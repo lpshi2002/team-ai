@@ -718,6 +718,56 @@ class TeamAiRuntimeTest(unittest.TestCase):
             self.assertEqual(old_packet["valid_to"], "2026-06-26")
             self.assertEqual(old_packet["superseded_by"], "MEM-AUTH-0002")
 
+    def test_refresh_promotes_shared_meeting_changes_to_memory_events(self):
+        from tempfile import TemporaryDirectory
+
+        from team_ai.runtime import build_context, refresh
+
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            repo = workspace / "team-ai"
+            pack = repo / "shared" / "packs" / "finance-ai-ideation"
+            meeting = pack / "sources" / "meetings" / "2026.06.29 meeting.md"
+            event_path = pack / "memory" / "events.jsonl"
+            (repo / ".team-ai").mkdir(parents=True)
+            event_path.parent.mkdir(parents=True)
+            meeting.parent.mkdir(parents=True)
+            (repo / ".team-ai" / "project.yaml").write_text(
+                "project_id: team-ai-workspace\n"
+                "scope: workspace:team-ai\n"
+                "imports:\n"
+                "  - scope: program:finance-ai-ideation\n"
+                "    path: shared/packs/finance-ai-ideation\n"
+                "scope_modes:\n"
+                "  normal:\n"
+                "    include:\n"
+                "      - workspace:team-ai\n"
+                "      - program:finance-ai-ideation\n",
+                encoding="utf-8",
+            )
+            meeting.write_text("결정: VC 방향을 선택한다.", encoding="utf-8")
+
+            result = refresh(repo)
+
+            self.assertEqual(result["memory_events"], 1)
+            events = [json.loads(line) for line in event_path.read_text(encoding="utf-8").splitlines()]
+            first_memory = events[0]["memory"]
+            self.assertTrue(first_memory["id"].startswith("MEM-AUTH-AUTO-"))
+            self.assertEqual(first_memory["content"], "결정: VC 방향을 선택한다.")
+            self.assertEqual(first_memory["source_refs"], ["pack://finance-ai-ideation/sources/meetings/2026.06.29 meeting.md#page=1"])
+
+            packet = build_context(repo, "VC 방향", limit=5)
+            self.assertTrue(any(memory["id"] == first_memory["id"] for memory in packet["memories"]))
+
+            meeting.write_text("결정: VC 기술성 검토 방향을 선택한다.", encoding="utf-8")
+            second = refresh(repo)
+
+            self.assertEqual(second["memory_events"], 1)
+            history = build_context(repo, "VC 방향은 왜 바뀌었어?", limit=10)
+            by_content = {memory["content"]: memory for memory in history["memories"]}
+            self.assertEqual(by_content["결정: VC 방향을 선택한다."]["status"], "superseded")
+            self.assertEqual(by_content["결정: VC 기술성 검토 방향을 선택한다."]["status"], "active")
+
     def test_refresh_refuses_to_delete_when_source_root_disappears(self):
         from tempfile import TemporaryDirectory
 

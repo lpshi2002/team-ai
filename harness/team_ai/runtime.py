@@ -68,6 +68,7 @@ def refresh(repo: str | Path) -> dict[str, int]:
         source_ids = _source_ids_for_scan(db, scanned)
         seen: set[str] = set()
         changed = 0
+        changed_sources: list[tuple[str, str, Path]] = []
         for path, rel, content_hash, digest in scanned:
             seen.add(rel)
             source_id = source_ids[rel]
@@ -77,9 +78,11 @@ def refresh(repo: str | Path) -> dict[str, int]:
             old_row = db.execute("select path from sources where id = ?", (source_id,)).fetchone()
             old_rel = old_row["path"] if old_row else rel
             changed += 1
+            changed_sources.append((source_id, rel, path))
             _upsert_source(db, source_id, rel, path, digest)
             _replace_spans_and_memories(db, source_id, rel, path, {old_rel, rel})
         _mark_deleted_sources(db, seen)
+        memory_events = _write_memory_events_for_changed_meetings(repo, db, changed_sources)
         _replace_authored_memories(repo, db)
         _rescope_generated_memories(db)
         _validate_integrity(db)
@@ -90,6 +93,7 @@ def refresh(repo: str | Path) -> dict[str, int]:
             "spans": db.execute("select count(*) from spans").fetchone()[0],
             "memories": db.execute("select count(*) from memories").fetchone()[0],
             "changed": changed,
+            "memory_events": memory_events,
         }
         counts["snapshot_id"] = _export_compiled(repo, db)
         return counts
@@ -701,6 +705,123 @@ def _replace_spans_and_memories(
                 None,
             ),
         )
+
+
+def _write_memory_events_for_changed_meetings(
+    repo: Path,
+    db: sqlite3.Connection,
+    changed_sources: list[tuple[str, str, Path]],
+) -> int:
+    written = 0
+    for source_id, rel, path in changed_sources:
+        if not _meeting_source(rel):
+            continue
+        event_path = _memory_event_path_for_source(repo, rel, path)
+        if event_path is None:
+            continue
+        existing_ids = _event_memory_ids(event_path)
+        events: list[dict] = []
+        for row in db.execute(
+            "select id, page, text, source_ref, span_index from spans where source_id = ? order by span_index",
+            (source_id,),
+        ).fetchall():
+            if not _should_promote_to_memory(row["text"], rel):
+                continue
+            event = _memory_event_for_span(rel, row)
+            if event["memory"]["id"] not in existing_ids:
+                events.append(event)
+                existing_ids.add(event["memory"]["id"])
+            db.execute("delete from memories where id = ?", (_memory_id(row["id"]),))
+        if not events:
+            continue
+        event_path.parent.mkdir(parents=True, exist_ok=True)
+        with event_path.open("a", encoding="utf-8") as f:
+            for event in events:
+                f.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+        written += len(events)
+    return written
+
+
+def _memory_event_path_for_source(repo: Path, rel: str, path: Path) -> Path | None:
+    pack = _shared_pack_root_for_path(path)
+    if pack is not None:
+        memory_dir = pack / "memory"
+        return memory_dir / MEMORY_EVENTS_FILE if memory_dir.exists() else None
+    if rel.startswith((".team-ai/sources/meetings/", "회의록/")):
+        memory_dir = repo / TEAM_AI_DIR / "memory"
+        return memory_dir / MEMORY_EVENTS_FILE if memory_dir.exists() else None
+    return None
+
+
+def _shared_pack_root_for_path(path: Path) -> Path | None:
+    for parent in path.resolve().parents:
+        if parent.parent.name == "packs" and parent.parent.parent.name == "shared":
+            return parent
+    return None
+
+
+def _event_memory_ids(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    ids = set()
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            memory = event.get("memory") or {}
+            if memory.get("id"):
+                ids.add(memory["id"])
+    return ids
+
+
+def _memory_event_for_span(rel: str, span: sqlite3.Row) -> dict:
+    source_ref = _portable_source_ref(span["source_ref"])
+    scope = _scope_for_source_path(rel)
+    canonical_key = f"{scope}:source:{source_ref.split('#', 1)[0]}:span:{span['span_index']}"
+    content = span["text"][:900]
+    memory_id = "MEM-AUTH-AUTO-" + hashlib.sha1(f"{canonical_key}:{content}".encode("utf-8")).hexdigest()[:12]
+    valid_from = _date_from_source_path(rel)
+    memory = {
+        "id": memory_id,
+        "kind": _kind(span["text"], rel),
+        "scope": scope,
+        "canonical_key": canonical_key,
+        "content": content,
+        "reason": "Automatically promoted from a synced meeting source.",
+        "authority": _authority(span["text"], rel),
+        "origin": "source",
+        "status": "active",
+        "source_refs": [source_ref],
+        "related": [],
+        "share_policy": "share_candidate",
+    }
+    if valid_from:
+        memory["occurred_at"] = valid_from
+        memory["valid_from"] = valid_from
+    return {
+        "event_id": "MEM-EVT-AUTO-" + hashlib.sha1(memory_id.encode("utf-8")).hexdigest()[:12],
+        "operation": "upsert",
+        "canonical_key": canonical_key,
+        "effective_from": valid_from,
+        "reason": memory["reason"],
+        "memory": memory,
+    }
+
+
+def _portable_source_ref(source_ref: str) -> str:
+    path, sep, suffix = source_ref.partition("#")
+    match = re.search(r"(?:^|/)shared/packs/([^/]+)/(.+)$", path)
+    if not match:
+        return source_ref
+    return f"pack://{match.group(1)}/{match.group(2)}{sep}{suffix}"
+
+
+def _date_from_source_path(rel: str) -> str | None:
+    match = re.search(r"(20\d{2})[._-](\d{2})[._-](\d{2})", rel)
+    if not match:
+        return None
+    return "-".join(match.groups())
 
 
 def _extract_spans(rel: str, path: Path) -> list[dict]:
