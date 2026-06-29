@@ -5,6 +5,11 @@
 .mypy_cache/
 .ruff_cache/
 .DS_Store
+.team-ai/compiled/
+.team-ai/local/
+.team-ai/cache/
+.team-ai/tmp/
+.team-ai/logs/
 *.sqlite
 *.sqlite3
 *.db

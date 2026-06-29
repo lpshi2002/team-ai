@@ -455,6 +455,179 @@ class TeamAiRuntimeTest(unittest.TestCase):
             self.assertIn("finance-ai-ideation", packet["project_state"])
             self.assertIn("program pack state unique", packet["project_state"]["finance-ai-ideation"]["text"])
 
+    def test_auto_context_treats_memory_recall_as_project_recall(self):
+        from tempfile import TemporaryDirectory
+
+        from team_ai.runtime import build_context
+
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            repo = workspace / "team-ai"
+            finance = repo / "shared" / "packs" / "finance-ai-ideation"
+            harness = repo / "shared" / "packs" / "harness-team-ai"
+            (repo / ".team-ai").mkdir(parents=True)
+            (finance / "memory").mkdir(parents=True)
+            (finance / "sources" / "meetings").mkdir(parents=True)
+            (harness / "memory").mkdir(parents=True)
+            (repo / ".team-ai" / "project.yaml").write_text(
+                "project_id: team-ai-workspace\n"
+                "scope: workspace:team-ai\n"
+                "imports:\n"
+                "  - scope: program:finance-ai-ideation\n"
+                "    path: shared/packs/finance-ai-ideation\n"
+                "  - scope: harness:team-ai\n"
+                "    path: shared/packs/harness-team-ai\n"
+                "scope_modes:\n"
+                "  normal:\n"
+                "    include:\n"
+                "      - workspace:team-ai\n"
+                "      - program:finance-ai-ideation\n"
+                "  harness:\n"
+                "    include:\n"
+                "      - harness:team-ai\n",
+                encoding="utf-8",
+            )
+            (finance / "memory" / "curated.jsonl").write_text(
+                json.dumps(
+                    {
+                        "id": "MEM-AUTH-FIN-0001",
+                        "kind": "discussion",
+                        "scope": "program:finance-ai-ideation",
+                        "content": "회의에서는 금융사기 탐지 아이디어가 나왔다.",
+                        "authority": "user_explicit",
+                        "origin": "user",
+                        "status": "active",
+                        "source_refs": [],
+                        "related": [],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (harness / "memory" / "curated.jsonl").write_text(
+                json.dumps(
+                    {
+                        "id": "MEM-AUTH-HARNESS-0001",
+                        "kind": "principle",
+                        "scope": "harness:team-ai",
+                        "content": "memory schema harness only",
+                        "authority": "user_explicit",
+                        "origin": "user",
+                        "status": "active",
+                        "source_refs": [],
+                        "related": [],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (finance / "sources" / "meetings" / "2026.06.25 meeting.md").write_text(
+                "회의에서는 금융사기 탐지 아이디어가 나왔다.\n후속 span도 있다.",
+                encoding="utf-8",
+            )
+            (finance / "sources" / "meetings" / "2026.06.26 meeting.md").write_text(
+                "회의에서는 평가 기준을 얘기했다.",
+                encoding="utf-8",
+            )
+
+            packet = build_context(repo, "기억 가져와줘. 지난번 회의 뭐 나왔지?", limit=5)
+
+            self.assertEqual(packet["mode"], "normal")
+            self.assertEqual(packet["intent"], "meeting_recall")
+            self.assertIn("program:finance-ai-ideation", packet["allowed_scopes"])
+            self.assertNotIn("harness:team-ai", packet["allowed_scopes"])
+            self.assertEqual(packet["memories"][0]["id"], "MEM-AUTH-FIN-0001")
+            source_refs = [span["source_ref"] for span in packet["source_evidence"][:2]]
+            self.assertTrue(any("2026.06.25 meeting.md" in ref for ref in source_refs))
+            self.assertTrue(any("2026.06.26 meeting.md" in ref for ref in source_refs))
+
+    def test_pack_uri_source_ref_resolves_from_renamed_coworker_pack(self):
+        from tempfile import TemporaryDirectory
+
+        from team_ai.runtime import build_context
+
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            repo = workspace / "product"
+            pack = workspace / "my-team-ai" / "shared" / "packs" / "finance-ai-ideation"
+            (repo / ".team-ai").mkdir(parents=True)
+            (pack / "sources" / "meetings").mkdir(parents=True)
+            (pack / "memory").mkdir(parents=True)
+            (repo / ".team-ai" / "project.yaml").write_text(
+                "project_id: product\n"
+                "scope: project:product\n"
+                "imports:\n"
+                "  - scope: program:finance-ai-ideation\n"
+                "    path: ../my-team-ai/shared/packs/finance-ai-ideation\n"
+                "scope_modes:\n"
+                "  normal:\n"
+                "    include:\n"
+                "      - project:product\n"
+                "      - program:finance-ai-ideation\n",
+                encoding="utf-8",
+            )
+            (pack / "sources" / "meetings" / "meeting.md").write_text(
+                "원칙: pack uri support remains readable.",
+                encoding="utf-8",
+            )
+            (pack / "memory" / "curated.jsonl").write_text(
+                json.dumps(
+                    {
+                        "id": "MEM-AUTH-FIN-0001",
+                        "kind": "principle",
+                        "scope": "program:finance-ai-ideation",
+                        "content": "pack uri support remains readable.",
+                        "authority": "individual_opinion",
+                        "origin": "source",
+                        "status": "active",
+                        "source_refs": ["pack://finance-ai-ideation/sources/meetings/meeting.md#page=1"],
+                        "related": [],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            packet = build_context(repo, "pack uri support", limit=5)
+            memory = next(item for item in packet["memories"] if item["id"] == "MEM-AUTH-FIN-0001")
+
+            self.assertTrue(memory["supporting_spans"])
+            self.assertTrue(
+                memory["supporting_spans"][0]["source_ref"].endswith(
+                    "my-team-ai/shared/packs/finance-ai-ideation/sources/meetings/meeting.md#page=1"
+                )
+            )
+
+    def test_active_decisions_are_bucketed_by_scope(self):
+        from tempfile import TemporaryDirectory
+
+        from team_ai.runtime import build_context
+
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            project_decisions = repo / ".team-ai" / "decisions"
+            project_decisions.mkdir(parents=True)
+            (project_decisions / "DEC-0001.md").write_text(
+                "---\n"
+                "id: DEC-0001\n"
+                "title: Project decision\n"
+                "status: active\n"
+                "authority: user-approved\n"
+                "scope:\n"
+                "  - project:finance-architecture\n"
+                "---\n\n"
+                "## Decision\n\nProject.\n",
+                encoding="utf-8",
+            )
+
+            packet = build_context(repo, "프로젝트 결정", limit=5)
+
+            self.assertEqual(packet["active_decisions"][0]["id"], "DEC-0001")
+            self.assertEqual(packet["active_decisions_by_scope"]["project"][0]["id"], "DEC-0001")
+
     def test_build_context_ranks_specific_new_source_before_generic_matches(self):
         from tempfile import TemporaryDirectory
 

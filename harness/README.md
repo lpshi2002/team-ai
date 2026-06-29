@@ -16,11 +16,15 @@ team-ai guard
 From the workspace root, create a connected project:
 
 ```bash
-team-ai init project finance-architecture
+team-ai init project fraud-signal-lab \
+  --from-pack finance-ai-ideation \
+  --idea "financial fraud detection and prevention"
 ```
 
 When `shared/packs/finance-ai-ideation` exists, it is imported by default as
-the seed idea/decision pack. Override it with `--from-pack other-pack`.
+the seed idea/decision pack. Override it with `--from-pack other-pack`, or seed
+from a decision with `--decision DEC-FIN-0001`.
 
-Project repositories import shared packs from `../team-ai/shared/packs/...`.
-They should not copy this package under `tools/`.
+Project repositories import shared packs from the coworker clone's
+`shared/packs/...`; generated paths adapt to the clone folder name. They should
+not copy this package under `tools/`.

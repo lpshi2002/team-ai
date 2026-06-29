@@ -1,0 +1,29 @@
+project_id: team-ai-workspace
+project_type: knowledge_workspace
+status: active
+updated_at: 2026-06-29
+
+current_goal: >
+  Operate the private team AI coworker workspace so Codex can recall finance
+  ideation meetings, memories, decisions, and source evidence before creating
+  product project repositories.
+
+current_priorities:
+  - answer finance ideation and meeting recall questions from shared pack evidence
+  - keep harness operation context separate from product and ideation context
+  - create seeded project folders only after an idea or decision is selected
+  - preserve source-backed reasoning for future implementation projects
+
+constraints:
+  - default recall questions use finance ideation material, not harness internals
+  - use harness context only for explicit team-ai CLI, guard, verify, schema, runtime, or scope-rule questions
+  - do not treat brainstormed meeting ideas as official team decisions
+  - do not provide personalized investment, legal, or regulatory conclusions
+
+next_actions:
+  - use team-ai context for recall, decision, and implementation direction requests
+  - use team-ai init project with --idea or --decision when creating a product project
+  - run team-ai guard before finalizing implementation changes
+
+open_questions:
+  - which finance AI idea should become the first concrete product project

@@ -1,0 +1,18 @@
+source_roots:
+  - .team-ai/project.yaml
+  - .team-ai/state.yaml
+
+project_config: .team-ai/project.yaml
+
+shared_pack_roots:
+  - shared/packs
+
+verification:
+  commands:
+    - PYTHONPATH=harness python -m unittest discover -s harness/tests
+
+scope_inference:
+  - path: .team-ai/project.yaml
+    scope: workspace:team-ai
+  - path: .team-ai/state.yaml
+    scope: workspace:team-ai

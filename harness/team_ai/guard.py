@@ -102,6 +102,7 @@ def _git_tracking_errors(repo: Path) -> list[str]:
         ".team-ai/tmp/",
         ".team-ai/logs/",
         ".team-ai/local/",
+        ".team-ai/compiled/",
         "output/",
         "outputs/",
         "tools/team_ai/",

@@ -12,8 +12,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("question", nargs="+")
     parser.add_argument(
         "--mode",
-        choices=("answer", "normal", "harness", "global_shared", "compare_projects", "implementation"),
-        default="answer",
+        choices=("auto", "answer", "normal", "harness", "global_shared", "compare_projects", "implementation"),
+        default="auto",
     )
     parser.add_argument("--limit", type=int, default=8)
     args = parser.parse_args(argv)
@@ -29,6 +29,7 @@ def _summary(packet: dict, mode: str) -> str:
         "Harness context loaded",
         f"snapshot: {packet['refresh']['snapshot_id']}",
         f"mode: {packet.get('mode', mode)}",
+        f"intent: {packet.get('intent', 'current')}",
         f"allowed scopes: {', '.join(packet.get('allowed_scopes', []))}",
         f"projects: {', '.join(sorted(packet.get('project_state', {})))}",
         "",

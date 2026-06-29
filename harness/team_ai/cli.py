@@ -27,12 +27,15 @@ def main(argv: list[str] | None = None) -> int:
     project = init_sub.add_parser("project", help="Create a project folder wired to this workspace harness.")
     project.add_argument("name")
     project.add_argument("--from-pack", help="Seed the project from a shared idea/decision pack.")
+    project.add_argument("--idea", help="Seed the project with a selected idea direction.")
+    project.add_argument("--decision", help="Seed the project from a decision id.")
+    project.add_argument("--goal", help="Override the generated initial goal.")
     args = parser.parse_args(argv)
 
     if args.command == "context":
         return context_main([])
     if args.command == "init" and args.init_command == "project":
-        return _init_project(Path("."), args.name, args.from_pack)
+        return _init_project(Path("."), args.name, args.from_pack, args.idea, args.decision, args.goal)
     if args.command == "refresh":
         print(json.dumps(refresh("."), ensure_ascii=False, indent=2))
         return 0
@@ -45,7 +48,14 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if result["ok"] else 1
 
 
-def _init_project(workspace: Path, name: str, from_pack: str | None = None) -> int:
+def _init_project(
+    workspace: Path,
+    name: str,
+    from_pack: str | None = None,
+    idea: str | None = None,
+    decision: str | None = None,
+    goal: str | None = None,
+) -> int:
     workspace = workspace.resolve()
     coworker = _coworker_root(workspace)
     project_parent = workspace.parent if workspace == coworker else workspace
@@ -68,7 +78,7 @@ def _init_project(workspace: Path, name: str, from_pack: str | None = None) -> i
         path.mkdir(parents=True, exist_ok=True)
     files = {
         root / ".team-ai" / "project.yaml": _project_yaml(name, shared_packs, seed_pack),
-        root / ".team-ai" / "state.yaml": _state_yaml(name, seed_pack),
+        root / ".team-ai" / "state.yaml": _state_yaml(name, seed_pack, idea, decision, goal),
         root / ".team-ai" / "config.yaml": _config_yaml(name, shared_packs),
         root / ".team-ai" / "memory" / "curated.jsonl": "",
         root / "src" / package / "__init__.py": "",
@@ -81,6 +91,10 @@ def _init_project(workspace: Path, name: str, from_pack: str | None = None) -> i
     for path, text in files.items():
         if not path.exists():
             path.write_text(text, encoding="utf-8")
+    if seed_pack and (idea or decision):
+        decision_path = root / ".team-ai" / "decisions" / "DEC-INIT-0001.md"
+        if not decision_path.exists():
+            decision_path.write_text(_seed_decision_md(name, seed_pack, idea, decision, goal), encoding="utf-8")
     print(f"created {root}")
     return 0
 
@@ -160,9 +174,13 @@ scope_modes:
     include:
       - {scope}
       - org:jo
-      - harness:team-ai
       - domain:finance-ai
-      - domain:agent-infra
+{seed_scope}    exclude_other_projects: true
+  implementation:
+    include:
+      - {scope}
+      - org:jo
+      - domain:finance-ai
 {seed_scope}    exclude_other_projects: true
   harness:
     include:
@@ -191,20 +209,41 @@ source_scope_rules:
 """
 
 
-def _state_yaml(name: str, seed_pack: dict[str, str] | None = None) -> str:
+def _state_yaml(
+    name: str,
+    seed_pack: dict[str, str] | None = None,
+    idea: str | None = None,
+    decision: str | None = None,
+    goal: str | None = None,
+) -> str:
     seed = ""
     if seed_pack:
+        selected = ""
+        if idea or decision:
+            selected = f"""
+selected_direction:
+  idea: {idea or "null"}
+  decision: {decision or "null"}
+  source_pack: {seed_pack["name"]}
+"""
         seed = f"""
 seed_context:
   pack: {seed_pack["name"]}
   scope: {seed_pack["scope"]}
   path: {seed_pack["path"]}
-"""
+{selected}"""
+    subject = idea or decision or "the first project direction"
+    current_goal = goal or f"Build the first implementation slice for {subject}."
     return f"""project_id: {name}
 status: initial
 current_goal: >
-  Define the first project direction.
-{seed}"""
+  {current_goal}
+{seed}
+next_actions:
+  - define the first concrete user workflow
+  - identify evidence sources needed for a credible demo
+  - create the smallest testable implementation slice
+"""
 
 
 def _config_yaml(name: str, shared_packs: str) -> str:
@@ -236,7 +275,27 @@ verification:
 def _agents_md() -> str:
     return """# Agent Rules
 
-- Use `team-ai context` before project-context answers or implementation work.
+Before answering questions about prior meetings, memories, decisions, project
+direction, or implementation direction, run:
+
+```bash
+team-ai context "USER_REQUEST"
+```
+
+Before changing product code under `src/` or `tests/`, run:
+
+```bash
+team-ai context --mode implementation "USER_REQUEST"
+```
+
+Treat "회의 때 뭐 나왔지", "지난번에 뭐라고 했지", "기억 가져와줘",
+"결정 내용이 뭐야", and "이 아이디어로 만들어줘" as project knowledge
+recall requests.
+
+Only use harness context when the user explicitly asks about team-ai harness,
+CLI behavior, guard, verify, memory schema, AGENTS.md mechanics, project.yaml
+scope rules, runtime, or compiled snapshots.
+
 - Active project is defined in `.team-ai/project.yaml`.
 - Raw materials and meeting notes live under `.team-ai/sources/`.
 - Approved durable memories live under `.team-ai/memory/`.
@@ -275,6 +334,7 @@ From this project root:
 
 ```bash
 team-ai context "현재 프로젝트 상태 요약"
+team-ai context --mode implementation "MVP 구조 구현"
 team-ai guard
 ```
 {seed}"""
@@ -291,11 +351,50 @@ __pycache__/
 *.sqlite3
 *.db
 .team-ai/local/
+.team-ai/compiled/
 .team-ai/cache/
 .team-ai/tmp/
 .team-ai/logs/
 output/
 outputs/
+"""
+
+
+def _seed_decision_md(
+    name: str,
+    seed_pack: dict[str, str],
+    idea: str | None,
+    decision: str | None,
+    goal: str | None,
+) -> str:
+    direction = idea or decision or "selected seed direction"
+    source_refs = ""
+    if decision:
+        source_refs = f"""source_refs:
+  - pack://{seed_pack["name"]}/decisions/{decision}.md
+"""
+    return f"""---
+id: DEC-INIT-0001
+title: Seed project from finance ideation direction
+status: active
+authority: user-approved
+scope:
+  - project:{name}
+{source_refs}---
+
+## Decision
+
+This project is seeded from `{seed_pack["name"]}` with direction: {direction}.
+
+## Goal
+
+{goal or f"Build the first implementation slice for {direction}."}
+
+## Constraints
+
+- Do not treat brainstormed meeting ideas as final team decisions unless explicitly approved.
+- Preserve the original problem framing from the seed pack.
+- Do not choose a multi-agent architecture unless decomposition is justified.
 """
 
 

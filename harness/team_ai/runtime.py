@@ -99,7 +99,7 @@ def refresh(repo: str | Path) -> dict[str, int]:
 
 def build_context(repo: str | Path, question: str, limit: int = 8, mode: str | None = None) -> dict:
     repo = Path(repo)
-    requested_mode = mode or ("implementation" if _implementation_intent(question) else "normal")
+    requested_mode = _classify_query_mode(question) if mode in (None, "auto", "answer") else mode
     counts = refresh(repo)
     terms = _terms(question)
     intent = _query_intent(question)
@@ -126,11 +126,13 @@ def build_context(repo: str | Path, question: str, limit: int = 8, mode: str | N
         packet = {
             "question": question,
             "mode": query_mode,
+            "intent": intent,
             "active_project": project["scope"],
             "allowed_scopes": sorted(scopes),
             "refresh": counts,
             "project_state": project_state,
             "active_decisions": active_decisions,
+            "active_decisions_by_scope": _decision_buckets(active_decisions),
             "decision_history": decision_history,
             "source_evidence": span_packets,
             "spans": span_packets,
@@ -194,6 +196,7 @@ def _record_context_run(repo: Path, packet: dict, mode: str) -> None:
         "type": "context",
         "mode": packet.get("mode", mode),
         "requested_mode": mode,
+        "intent": packet.get("intent"),
         "question": packet["question"],
         "snapshot_id": packet["refresh"]["snapshot_id"],
         "allowed_scopes": packet.get("allowed_scopes", []),
@@ -1112,7 +1115,7 @@ def _authored_memory_event(row: dict, path: Path, line_no: int) -> dict:
 def _valid_scope(scope: str) -> bool:
     if scope == "team":
         return True
-    return bool(re.match(r"^(org|harness|domain|program|project|task):[A-Za-z0-9_.-]+$", scope))
+    return bool(re.match(r"^(org|harness|domain|program|project|task|workspace):[A-Za-z0-9_.-]+$", scope))
 
 
 def _normalize_scope(scope: str | None) -> str:
@@ -1190,6 +1193,8 @@ def _validate_integrity(db: sqlite3.Connection) -> None:
 def _source_ref_exists(ref: str, source_paths: set[str], span_refs: set[str]) -> bool:
     if _external_ref(ref):
         return True
+    if _pack_ref_suffix(ref):
+        return any(_source_ref_equivalent(ref, candidate) for candidate in source_paths | span_refs)
     return any(_source_ref_exists_exact(candidate, source_paths, span_refs) for candidate in _source_ref_candidates(ref))
 
 
@@ -1200,7 +1205,7 @@ def _source_ref_exists_exact(ref: str, source_paths: set[str], span_refs: set[st
 
 
 def _external_ref(ref: str) -> bool:
-    return bool(re.match(r"^[a-z]+:", ref))
+    return bool(re.match(r"^[a-z]+:", ref)) and not ref.startswith("pack://")
 
 
 def _validate_no_cycles(edges: dict[str, str]) -> None:
@@ -1274,6 +1279,12 @@ def _supporting_spans(db: sqlite3.Connection, source_refs: list[str], content: s
             rows = db.execute("select * from spans where source_ref = ? order by span_index", (candidate,)).fetchall()
             if rows:
                 break
+        if not rows and _pack_ref_suffix(ref):
+            rows = [
+                row
+                for row in db.execute("select * from spans order by source_ref, span_index").fetchall()
+                if _source_ref_equivalent(ref, row["source_ref"])
+            ]
         if rows:
             packets.append(_span_packet(_best_supporting_span(rows, content)))
         if len(packets) >= limit:
@@ -1379,16 +1390,14 @@ def _scope_modes(text: str) -> dict[str, dict]:
 
 
 def _resolve_query_mode(requested_mode: str, question: str) -> str:
-    if requested_mode == "answer":
-        requested_mode = "normal"
-    if requested_mode == "normal" and _harness_intent(question):
-        return "harness"
     if requested_mode == "compare_projects" and not _compare_intent(question):
         raise ValueError("compare_projects mode requires explicit compare intent")
     return requested_mode
 
 
 def _resolve_allowed_scopes(project: dict, mode: str, question: str, project_state: dict) -> set[str]:
+    if mode == "implementation" and _harness_intent(question):
+        return _scope_aliases({"org:jo", "harness:team-ai", "domain:agent-infra"})
     configured = set((project.get("scope_modes", {}).get(mode) or {}).get("include") or [])
     if configured:
         return _scope_aliases(configured)
@@ -1399,8 +1408,6 @@ def _resolve_allowed_scopes(project: dict, mode: str, question: str, project_sta
         return _scope_aliases(imports | {"org:jo", "harness:team-ai", "domain:agent-infra", "domain:finance-ai"})
     if mode == "compare_projects":
         return _scope_aliases(imports | {f"project:{project_id}" for project_id in project_state})
-    if mode == "implementation" and _harness_intent(question):
-        return _scope_aliases({"org:jo", "harness:team-ai", "domain:agent-infra"})
     if _finance_intent(question):
         return _scope_aliases({project["scope"], *imports})
     fallback = _target_scopes(question, project_state)
@@ -1426,8 +1433,13 @@ def _scope_project_states(project_state: dict, scopes: set[str]) -> dict:
     state_ids = {
         scope.split(":", 1)[1]
         for scope in scopes
-        if scope.startswith(("project:", "program:", "harness:"))
+        if scope.startswith(("project:", "program:", "harness:", "workspace:"))
     }
+    state_ids.update(
+        f"{scope.split(':', 1)[1]}-workspace"
+        for scope in scopes
+        if scope.startswith("workspace:")
+    )
     if not state_ids:
         return project_state
     return {project_id: state for project_id, state in project_state.items() if project_id in state_ids}
@@ -1448,8 +1460,13 @@ def _target_scopes(question: str, project_state: dict) -> set[str]:
 def _harness_intent(question: str) -> bool:
     return bool(
         re.search(
-            r"하네스|harness|team-ai|memory|메모리|context|컨텍스트|runtime|compiled|span|scope|스코프|"
-            r"snapshot|refresh|retrieval|guard|verify|기억",
+            r"\bteam-ai\b|하네스|harness|"
+            r"\bguard\b|\bverify\b|\brefresh\b|"
+            r"runtime|compiled|snapshot|"
+            r"memory schema|메모리 스키마|"
+            r"context command|context 명령|"
+            r"scope rule|scope inference|스코프 규칙|"
+            r"project\.yaml|AGENTS\.md|CLI|명령어",
             question,
             re.I,
         )
@@ -1462,6 +1479,16 @@ def _finance_intent(question: str) -> bool:
 
 def _compare_intent(question: str) -> bool:
     return bool(re.search(r"비교|차이|compare|versus| vs |프로젝트 .+ 프로젝트", question, re.I))
+
+
+def _classify_query_mode(question: str) -> str:
+    if _implementation_intent(question):
+        return "implementation"
+    if _harness_intent(question):
+        return "harness"
+    if _compare_intent(question):
+        return "compare_projects"
+    return "normal"
 
 
 def _decision_records(repo: Path, active_only: bool, scopes: set[str] | None = None) -> list[dict]:
@@ -1495,6 +1522,26 @@ def _decision_records(repo: Path, active_only: bool, scopes: set[str] | None = N
                 }
             )
     return sorted(decisions, key=lambda item: (item.get("decided_at") or "", item["id"]))
+
+
+def _decision_buckets(decisions: list[dict]) -> dict[str, list[dict]]:
+    buckets = {"project": [], "program": [], "domain": [], "org": [], "harness": []}
+    for decision in decisions:
+        scopes = decision.get("scope") or ["team"]
+        key = "org"
+        for scope in scopes:
+            if scope.startswith("project:"):
+                key = "project"
+                break
+            if scope.startswith("program:"):
+                key = "program"
+            elif scope.startswith("domain:") and key == "org":
+                key = "domain"
+            elif scope.startswith("harness:"):
+                key = "harness"
+                break
+        buckets.setdefault(key, []).append(decision)
+    return buckets
 
 
 def _display_ref(repo: Path, path: Path) -> str:
@@ -1784,7 +1831,7 @@ def _scope_for_source_path(rel: str, config: dict | None = None) -> str:
 
 
 def _shared_pack_scope(rel: str) -> str | None:
-    match = re.search(r"(?:^|/|\.\./)(?:team-ai-shared|team-ai/shared)/packs/([^/]+)/", rel)
+    match = re.search(r"(?:^|/|\.\./)(?:[^/]+/)?shared/packs/([^/]+)/", rel)
     if not match:
         return None
     return {
@@ -1828,6 +1875,15 @@ def _output_source(rel: str) -> bool:
 def _source_ref_candidates(ref: str) -> list[str]:
     # ponytail: keep old refs readable until curated memory is approved for rewrite.
     candidates = [ref]
+    suffix = _pack_ref_suffix(ref)
+    if suffix:
+        candidates.extend(
+            (
+                suffix,
+                f"../team-ai/{suffix}",
+                f"../ai-coworker/{suffix}",
+            )
+        )
     aliases = (
         ("회의록/", ".team-ai/sources/meetings/"),
         ("회의록/", "../team-ai/shared/packs/finance-ai-ideation/sources/meetings/"),
@@ -1844,9 +1900,28 @@ def _source_ref_candidates(ref: str) -> list[str]:
     return candidates
 
 
+def _pack_ref_suffix(ref: str) -> str | None:
+    match = re.match(r"pack://([^/]+)/(.+)", ref)
+    if not match:
+        return None
+    return f"shared/packs/{match.group(1)}/{match.group(2)}"
+
+
+def _source_ref_equivalent(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    suffix = _pack_ref_suffix(left) or _pack_ref_suffix(right)
+    if not suffix:
+        return False
+    other = right if _pack_ref_suffix(left) else left
+    return other == suffix or other.endswith(f"/{suffix}")
+
+
 def _query_intent(question: str) -> str:
     if re.search(r"예전|과거|이전|전에는|변경|바뀌|왜 .*됐|왜.*바뀌|히스토리|history", question, re.I):
         return "history"
+    if re.search(r"회의|지난번|뭔 얘기|뭐 나왔|브레인스토밍|meeting|minutes", question, re.I):
+        return "meeting_recall"
     if re.search(r"원문|근거|자료|파일|source|evidence", question, re.I):
         return "evidence"
     return "current"
@@ -1881,6 +1956,8 @@ def _search_rows(
 
 
 def _search_spans(db: sqlite3.Connection, terms: list[str], limit: int, question: str, intent: str):
+    if intent == "meeting_recall":
+        return _search_meeting_spans(db, terms, limit, question)
     if not terms:
         rows = db.execute("select * from spans limit ?", (limit * 2,)).fetchall()
         return _filter_span_rows(rows, intent)[:limit]
@@ -1910,6 +1987,8 @@ def _span_policy_key(row: sqlite3.Row) -> tuple:
 
 
 def _search_memories(db: sqlite3.Connection, terms: list[str], limit: int, question: str, intent: str):
+    if intent == "meeting_recall":
+        return _search_meeting_memories(db, terms, limit, question)
     status_clause = "" if intent == "history" else " where status = 'active'"
     if not terms:
         return db.execute(f"select * from memories{status_clause}{_search_order('memories')} limit ?", (limit,)).fetchall()
@@ -1924,6 +2003,48 @@ def _search_memories(db: sqlite3.Connection, terms: list[str], limit: int, quest
         rows = [row for row in rows if row["status"] == "active"]
     rows.sort(key=lambda row: (*_memory_policy_key(row), rank_by_id.get(row["id"], len(ids))))
     return rows[:limit]
+
+
+def _search_meeting_spans(db: sqlite3.Connection, terms: list[str], limit: int, question: str):
+    rows = db.execute("select * from spans where source_type = 'meeting_note' order by source_ref desc, span_index").fetchall()
+    if terms:
+        scored = [(row, _text_score(row, "text", terms, question, ("source_ref",))) for row in rows]
+        rows = [row for row, score in sorted(scored, key=lambda item: item[1], reverse=True) if score > 0] or rows
+    rows = _representative_sources_first(rows)
+    return _filter_span_rows(rows, "current")[:limit]
+
+
+def _search_meeting_memories(db: sqlite3.Connection, terms: list[str], limit: int, question: str):
+    rows = db.execute(
+        """
+        select * from memories
+        where status = 'active'
+          and (
+            source_refs like '%/sources/meetings/%'
+            or source_refs like '%회의록/%'
+            or kind in ('discussion', 'principle', 'open_question', 'decision')
+          )
+        """
+    ).fetchall()
+    if terms:
+        scored = [(row, _text_score(row, "content", terms, question, ("canonical_key",))) for row in rows]
+        rows = [row for row, score in sorted(scored, key=lambda item: item[1], reverse=True) if score > 0] or rows
+    rows.sort(key=_memory_policy_key)
+    return rows[:limit]
+
+
+def _representative_sources_first(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+    seen: set[str] = set()
+    first: list[sqlite3.Row] = []
+    rest: list[sqlite3.Row] = []
+    for row in rows:
+        key = row["source_id"]
+        if key in seen:
+            rest.append(row)
+            continue
+        seen.add(key)
+        first.append(row)
+    return first + rest
 
 
 def _fts_ids(db: sqlite3.Connection, table: str, terms: list[str]) -> list[str]:
