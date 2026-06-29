@@ -1,0 +1,34 @@
+project_id: team-ai-harness
+project_type: operating_harness
+serves_scope: program:finance-ai-ideation
+status: active_supporting_system
+updated_at: 2026-06-29
+
+workspace_layout:
+  root: team-ai
+  harness_path: harness
+  shared_path: shared
+
+current_goal: >
+  Operate the finance AI ideation hub as an AI teammate environment. The
+  harness perceives source documents, keeps durable team memory, compiles
+  question-specific context, and separates reconstructed team views from
+  independent AI judgment.
+
+current_priorities:
+  - preserve source files and compiled spans as evidence
+  - keep durable memory close to source references
+  - distinguish source facts, individual opinions, team-explicit positions, user-explicit positions, and AI-inferred tendencies
+  - prioritize curated meeting memories over generic source memories during context retrieval
+  - store meeting agendas, discussed options, open questions, decisions, and next actions in curated memory
+  - keep routing natural and invisible to the user
+
+constraints:
+  - do not confuse the harness with the finance AI ideation hub or future product project repos
+  - do not let AI-inferred memory prove a team position by itself
+  - do not introduce GraphRAG, MCP, ADK, multi-agent orchestration, or a review queue until repeated failures justify it
+  - do not require an external LLM API for Codex or Claude to curate durable memory
+
+open_questions:
+  - whether retrieval needs a richer ranking model after more meeting notes are added
+  - whether source movement should preserve source IDs across path changes

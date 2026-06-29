@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "team-ai-harness"
+version = "0.1.0"
+description = "Local Team AI context and guard CLI"
+requires-python = ">=3.12"
+
+[project.scripts]
+team-ai = "team_ai.cli:main"
+
+[tool.setuptools]
+packages = ["team_ai"]
