@@ -304,8 +304,8 @@ class TeamAiRuntimeTest(unittest.TestCase):
                         "kind": "principle",
                         "scope": "project:finance-architecture",
                         "content": "프로젝트 방향은 회의록의 해야 할 일과 결정 기준을 우선한다.",
-                        "authority": "ai_inferred",
-                        "origin": "inferred",
+                        "authority": "individual_opinion",
+                        "origin": "source",
                         "status": "active",
                         "source_refs": ["회의록/example.md#page=1"],
                         "related": [],
@@ -319,6 +319,38 @@ class TeamAiRuntimeTest(unittest.TestCase):
             packet = build_context(repo, "프로젝트 방향", limit=1)
 
             self.assertEqual(packet["memories"][0]["id"], "MEM-AUTH-0009")
+
+    def test_authored_memory_rejects_inference(self):
+        from tempfile import TemporaryDirectory
+
+        from team_ai.runtime import refresh
+
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "회의록").mkdir()
+            (repo / "회의록" / "example.md").write_text("회의에서는 문제 스케일을 논의했다.", encoding="utf-8")
+            (repo / ".team-ai" / "memory").mkdir(parents=True)
+            (repo / ".team-ai" / "memory" / "curated.jsonl").write_text(
+                json.dumps(
+                    {
+                        "id": "MEM-AUTH-0001",
+                        "kind": "principle",
+                        "scope": "team",
+                        "content": "없는 기준을 추론해 저장한다.",
+                        "authority": "ai_inferred",
+                        "origin": "inferred",
+                        "status": "active",
+                        "source_refs": ["회의록/example.md#page=1"],
+                        "related": [],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "authored memory must preserve source context"):
+                refresh(repo)
 
     def test_build_context_reads_team_ai_project_state(self):
         from tempfile import TemporaryDirectory

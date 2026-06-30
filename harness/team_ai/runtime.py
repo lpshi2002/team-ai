@@ -1195,6 +1195,8 @@ def _authored_memory(row: dict, path: Path, line_no: int, repo: Path | None = No
         raise ValueError(f"{path}:{line_no} invalid authority: {row['authority']}")
     if row["origin"] not in MEMORY_ORIGINS:
         raise ValueError(f"{path}:{line_no} invalid origin: {row['origin']}")
+    if row["authority"] == "ai_inferred" or row["origin"] == "inferred":
+        raise ValueError(f"{path}:{line_no} authored memory must preserve source context, not inference")
     if row["status"] not in MEMORY_STATUSES:
         raise ValueError(f"{path}:{line_no} invalid status: {row['status']}")
     if row["origin"] != "user" and not row["source_refs"]:
