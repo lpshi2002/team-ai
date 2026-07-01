@@ -3,12 +3,22 @@
 Private team workspace for the Team AI Harness and shared packs.
 
 Give this repo link to a teammate's AI and ask it to install the coworker.
-After cloning, the only required command is:
+It works from Codex or Claude Code; both use the same `team-ai` CLI.
+After cloning, the only required install command is:
 
 ```bash
 ./install.sh
-codex
 ```
+
+Then start the agent you use from this repo root:
+
+```bash
+codex   # Codex
+claude  # Claude Code
+```
+
+Codex reads `AGENTS.md`. Claude reads `CLAUDE.md`, which points back to the
+same agent rules in `AGENTS.md`.
 
 ```text
 team-ai/
@@ -26,7 +36,7 @@ Install the CLI from `harness/`:
 Project repos import packs from this repo's `shared/packs/...`; generated
 paths adapt to the clone folder name.
 
-From this repo root, Codex can answer finance ideation recall questions:
+From this repo root, Codex or Claude can answer finance ideation recall questions:
 
 ```bash
 team-ai context "회의 때 뭔 얘기 나왔지?"
