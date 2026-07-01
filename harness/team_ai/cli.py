@@ -162,31 +162,22 @@ imports:
   - scope: harness:team-ai
     path: {shared_packs}/harness-team-ai
     required: false
-  - scope: domain:finance-ai
-    path: {shared_packs}/domain-finance-ai
-    required: false
-  - scope: domain:agent-infra
-    path: {shared_packs}/domain-agent-infra
-    required: false
 {seed_import}
 scope_modes:
   normal:
     include:
       - {scope}
       - org:jo
-      - domain:finance-ai
 {seed_scope}    exclude_other_projects: true
   implementation:
     include:
       - {scope}
       - org:jo
-      - domain:finance-ai
 {seed_scope}    exclude_other_projects: true
   harness:
     include:
       - org:jo
       - harness:team-ai
-      - domain:agent-infra
     exclude_project_sources_by_default: true
   compare_projects:
     require_explicit_user_intent: true

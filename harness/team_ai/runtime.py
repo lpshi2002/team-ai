@@ -1238,12 +1238,12 @@ def _authored_memory_event(row: dict, path: Path, line_no: int) -> dict:
 def _valid_scope(scope: str) -> bool:
     if scope == "team":
         return True
-    return bool(re.match(r"^(org|harness|domain|program|project|task|workspace):[A-Za-z0-9_.-]+$", scope))
+    return bool(re.match(r"^(org|harness|program|project|task|workspace):[A-Za-z0-9_.-]+$", scope))
 
 
 def _normalize_scope(scope: str | None) -> str:
     if scope == "cross-project":
-        return "domain:agent-infra"
+        return "team"
     return scope or "project:finance-architecture"
 
 
@@ -1461,7 +1461,7 @@ def _load_project_config(repo: Path, config: dict, project_state: dict) -> dict:
     project = {
         "project_id": fallback_id,
         "scope": f"project:{fallback_id}",
-        "imports": [{"scope": "domain:finance-ai"}, {"scope": "domain:agent-infra"}],
+        "imports": [],
         "scope_modes": {},
     }
     if not path.exists():
@@ -1520,15 +1520,15 @@ def _resolve_query_mode(requested_mode: str, question: str) -> str:
 
 def _resolve_allowed_scopes(project: dict, mode: str, question: str, project_state: dict) -> set[str]:
     if mode == "implementation" and _harness_intent(question):
-        return _scope_aliases({"org:jo", "harness:team-ai", "domain:agent-infra"})
+        return _scope_aliases({"org:jo", "harness:team-ai"})
     configured = set((project.get("scope_modes", {}).get(mode) or {}).get("include") or [])
     if configured:
         return _scope_aliases(configured)
     imports = {item["scope"] for item in project.get("imports", []) if item.get("scope")}
     if mode == "harness":
-        return _scope_aliases({"org:jo", "harness:team-ai", "domain:agent-infra"})
+        return _scope_aliases({"org:jo", "harness:team-ai"})
     if mode == "global_shared":
-        return _scope_aliases(imports | {"org:jo", "harness:team-ai", "domain:agent-infra", "domain:finance-ai"})
+        return _scope_aliases(imports | {"org:jo", "harness:team-ai"})
     if mode == "compare_projects":
         return _scope_aliases(imports | {f"project:{project_id}" for project_id in project_state})
     if _finance_intent(question):
@@ -1648,7 +1648,7 @@ def _decision_records(repo: Path, active_only: bool, scopes: set[str] | None = N
 
 
 def _decision_buckets(decisions: list[dict]) -> dict[str, list[dict]]:
-    buckets = {"project": [], "program": [], "domain": [], "org": [], "harness": []}
+    buckets = {"project": [], "program": [], "org": [], "harness": []}
     for decision in decisions:
         scopes = decision.get("scope") or ["team"]
         key = "org"
@@ -1658,8 +1658,6 @@ def _decision_buckets(decisions: list[dict]) -> dict[str, list[dict]]:
                 break
             if scope.startswith("program:"):
                 key = "program"
-            elif scope.startswith("domain:") and key == "org":
-                key = "domain"
             elif scope.startswith("harness:"):
                 key = "harness"
                 break
@@ -1760,7 +1758,7 @@ def _memory_buckets(memories: list[dict]) -> dict[str, list[dict]]:
             buckets["retrieval_hints"].append(memory)
         if memory["scope"].startswith("project:"):
             buckets["project_memories"].append(memory)
-        elif memory["scope"].startswith(("org:", "harness:", "domain:", "program:")) or memory["scope"] == "team":
+        elif memory["scope"].startswith(("org:", "harness:", "program:")) or memory["scope"] == "team":
             buckets["shared_memories"].append(memory)
     return buckets
 
@@ -1943,9 +1941,7 @@ def _scope_for_source_path(rel: str, config: dict | None = None) -> str:
     if _meeting_source(rel) or rel.startswith(".team-ai/sources/notes/") or rel.startswith(".team-ai/sources/uploads/") or _output_source(rel):
         return "project:finance-architecture"
     if _reference_source(rel):
-        if re.search(r"Agent|Context|SDLC|Prototype|MCP|Skills|Introduction to Agents", rel, re.I):
-            return "domain:agent-infra"
-        return "domain:finance-ai"
+        return "project:finance-architecture"
     if rel.startswith("tools/team_ai/"):
         return "harness:team-ai"
     if rel.startswith("src/finance_architecture/"):
@@ -1960,8 +1956,6 @@ def _shared_pack_scope(rel: str) -> str | None:
     return {
         "org-jo": "org:jo",
         "harness-team-ai": "harness:team-ai",
-        "domain-finance-ai": "domain:finance-ai",
-        "domain-agent-infra": "domain:agent-infra",
         "finance-ai-ideation": "program:finance-ai-ideation",
     }.get(match.group(1))
 
@@ -2234,7 +2228,7 @@ def _memory_policy_key(row: sqlite3.Row) -> tuple:
         0 if row["status"] == "active" else 1,
         0 if row["id"].startswith(AUTHORED_MEMORY_PREFIX) else 1,
         _authority_rank(row["authority"]),
-        0 if scope == "team" or scope.startswith(("project:", "org:", "harness:", "domain:")) else 1,
+        0 if scope == "team" or scope.startswith(("project:", "org:", "harness:")) else 1,
         row["id"],
     )
 
@@ -2268,7 +2262,6 @@ def _search_order(table: str) -> str:
                 when scope like 'project:%' then 0
                 when scope like 'org:%' then 0
                 when scope like 'harness:%' then 0
-                when scope like 'domain:%' then 0
                 else 1
             end,
             id

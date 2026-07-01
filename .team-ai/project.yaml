@@ -11,17 +11,11 @@ imports:
   - scope: org:jo
     path: shared/packs/org-jo
     required: false
-  - scope: domain:finance-ai
-    path: shared/packs/domain-finance-ai
-    required: false
   - scope: program:finance-ai-ideation
     path: shared/packs/finance-ai-ideation
     required: true
   - scope: harness:team-ai
     path: shared/packs/harness-team-ai
-    required: false
-  - scope: domain:agent-infra
-    path: shared/packs/domain-agent-infra
     required: false
 
 scope_modes:
@@ -29,19 +23,16 @@ scope_modes:
     include:
       - workspace:team-ai
       - org:jo
-      - domain:finance-ai
       - program:finance-ai-ideation
   implementation:
     include:
       - workspace:team-ai
       - org:jo
-      - domain:finance-ai
       - program:finance-ai-ideation
   harness:
     include:
       - org:jo
       - harness:team-ai
-      - domain:agent-infra
   compare_projects:
     require_explicit_user_intent: true
 
@@ -54,9 +45,5 @@ source_scope_rules:
     scope: program:finance-ai-ideation
   - path: shared/packs/harness-team-ai/**
     scope: harness:team-ai
-  - path: shared/packs/domain-finance-ai/**
-    scope: domain:finance-ai
-  - path: shared/packs/domain-agent-infra/**
-    scope: domain:agent-infra
   - path: shared/packs/org-jo/**
     scope: org:jo

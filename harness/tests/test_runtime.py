@@ -1214,8 +1214,7 @@ class TeamAiRuntimeTest(unittest.TestCase):
                 "  normal:\n"
                 "    include:\n"
                 "      - project:finance-architecture\n"
-                "      - org:jo\n"
-                "      - domain:finance-ai\n",
+                "      - org:jo\n",
                 encoding="utf-8",
             )
             (repo / ".team-ai" / "memory" / "curated.jsonl").write_text(

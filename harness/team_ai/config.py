@@ -23,19 +23,10 @@ DEFAULT_SCOPE_INFERENCE = (
     {"path": ".team-ai/sources/meetings/**", "scope": "project:finance-architecture"},
     {"path": ".team-ai/sources/notes/**", "scope": "project:finance-architecture"},
     {"path": ".team-ai/sources/uploads/**", "scope": "project:finance-architecture"},
-    {"path": ".team-ai/sources/references/*Agent*", "scope": "domain:agent-infra"},
-    {"path": ".team-ai/sources/references/*Context*", "scope": "domain:agent-infra"},
-    {"path": ".team-ai/sources/references/*SDLC*", "scope": "domain:agent-infra"},
-    {"path": ".team-ai/sources/references/*Prototype*", "scope": "domain:agent-infra"},
-    {"path": ".team-ai/sources/references/*MCP*", "scope": "domain:agent-infra"},
-    {"path": ".team-ai/sources/references/**", "scope": "domain:finance-ai"},
+    {"path": ".team-ai/sources/references/**", "scope": "project:finance-architecture"},
     {"path": "회의록/**", "scope": "project:finance-architecture"},
     {"path": "output/**", "scope": "project:finance-architecture"},
-    {"path": "자료/*Agent*", "scope": "domain:agent-infra"},
-    {"path": "자료/*Context*", "scope": "domain:agent-infra"},
-    {"path": "자료/*SDLC*", "scope": "domain:agent-infra"},
-    {"path": "자료/*Prototype*", "scope": "domain:agent-infra"},
-    {"path": "자료/**", "scope": "domain:finance-ai"},
+    {"path": "자료/**", "scope": "project:finance-architecture"},
 )
 
 
