@@ -17,7 +17,7 @@ from .config import TEAM_AI_DIR, load_config
 
 TEXT_SUFFIXES = {".md", ".txt", ".html", ".py", ".yaml", ".yml", ".json"}
 PDF_SUFFIXES = {".pdf"}
-PERCEPTION_VERSION = "memory-promote-v2"
+PERCEPTION_VERSION = "memory-promote-v3"
 AUTHORED_MEMORY_PREFIX = "MEM-AUTH-"
 MEMORY_EVENTS_FILE = "events.jsonl"
 GENERATED_MEMORY_FILES = {"current.jsonl"}
@@ -998,10 +998,10 @@ def _kind(text: str, rel: str) -> str:
         return "open_question"
     if re.search(r"결정|보류|기각|선택|우선|추천|하자", text):
         return "decision"
-    if re.search(r"원칙|기준|경향|중요", text):
-        return "principle"
     if _meeting_source(rel) or rel.startswith(".team-ai/sources/notes/"):
         return "discussion"
+    if re.search(r"원칙|기준|경향|중요", text):
+        return "principle"
     return "concept"
 
 
