@@ -10,6 +10,10 @@
 .team-ai/cache/
 .team-ai/tmp/
 .team-ai/logs/
+shared/packs/*/memory/
+!shared/packs/harness-team-ai/memory/
+shared/packs/*/sources/
+shared/packs/*/state.yaml
 *.sqlite
 *.sqlite3
 *.db
