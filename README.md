@@ -4,11 +4,26 @@ Private team workspace for the Team AI Harness and shared packs.
 
 Give this repo link to a teammate's AI and ask it to install the coworker.
 It works from Codex or Claude Code; both use the same `team-ai` CLI.
-After cloning, the only required install command is:
+
+Onboard a teammate:
 
 ```bash
+git clone https://github.com/lpshi2002/team-ai.git
+cd team-ai
 ./install.sh
+command -v pdftotext || brew install poppler
 ```
+
+Put shared meeting notes or PDFs in
+`shared/packs/finance-ai-ideation/sources/meetings/`, then ask the agent:
+
+```text
+메모리 최신화 해줘
+```
+
+The agent should draft memory upserts, ask for approval, and run
+`team-ai refresh` after approval. Recall works after the shared sources and
+approved memory updates are present; a bare clone only installs the harness.
 
 Then start the agent you use from this repo root:
 
@@ -25,12 +40,6 @@ team-ai/
   .team-ai/ # root knowledge workspace config
   harness/  # CLI/runtime/tests
   shared/   # private packs: sources, memory, state
-```
-
-Install the CLI from `harness/`:
-
-```bash
-./install.sh
 ```
 
 Project repos import packs from this repo's `shared/packs/...`; generated

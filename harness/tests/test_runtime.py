@@ -8,6 +8,12 @@ from pathlib import Path
 
 
 class TeamAiRuntimeTest(unittest.TestCase):
+    def test_memory_update_requests_are_harness_intent(self):
+        from team_ai.runtime import _classify_query_mode
+
+        for question in ("메모리 최신화 해줘", "메모리 업데이트 부탁", "memory update please"):
+            self.assertEqual(_classify_query_mode(question), "harness")
+
     def test_refresh_stores_sources_spans_and_promoted_memories(self):
         from tempfile import TemporaryDirectory
 

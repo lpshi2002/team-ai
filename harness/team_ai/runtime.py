@@ -1587,6 +1587,7 @@ def _harness_intent(question: str) -> bool:
             r"\bguard\b|\bverify\b|\brefresh\b|"
             r"runtime|compiled|snapshot|"
             r"memory schema|메모리 스키마|"
+            r"메모리 최신화|메모리 업데이트|memory update|"
             r"context command|context 명령|"
             r"scope rule|scope inference|스코프 규칙|"
             r"project\.yaml|AGENTS\.md|CLI|명령어",
