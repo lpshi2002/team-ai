@@ -21,7 +21,13 @@ shared/packs/*/sources/**
 !shared/packs/*/sources/meetings/README.md
 !shared/packs/*/sources/references/
 !shared/packs/*/sources/references/README.md
+shared/packs/*/decisions/**
+!shared/packs/*/decisions/
+!shared/packs/*/decisions/README.md
+!shared/packs/harness-team-ai/decisions/**
+shared/packs/*/tools/**
 shared/packs/*/state.yaml
+tmp/
 *.sqlite
 *.sqlite3
 *.db

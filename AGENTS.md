@@ -36,6 +36,9 @@ This is the private AI coworker workspace.
 ## Memory Update Trigger
 
 - When new files appear under `shared/packs/*/sources/meetings/`, or the user asks to refresh/update memory, draft `memory/events.jsonl` upserts using MEM-AUTH-HARNESS-0017 and the curation rules above, ask for user approval, then run `team-ai refresh`.
+- Supersession check: before writing each draft, search existing active memories on the same topic. If the draft updates the same claim, reuse the existing `canonical_key` or list the old ids in the event's `supersedes`. If it contradicts or narrows an existing memory, propose `supersedes` or a `related` link and say why.
+- Dated discussion records (kind `discussion`/`note`) stay active as history. Only current-truth claims (kind `task`, `decision`, `preference`, `open_question`) get superseded when the state moves on; a `task` whose deadline passed or whose work is done is a supersession candidate.
+- Never supersede a memory without user approval. After approval, run `team-ai refresh` and report any superseded ids.
 - Do not commit private live memory, local DBs, caches, compiled snapshots, or unapproved memory events.
 
 ## Commands
