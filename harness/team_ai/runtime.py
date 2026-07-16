@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 import unicodedata
 from fnmatch import fnmatch
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .config import TEAM_AI_DIR, load_config
@@ -22,6 +22,54 @@ AUTHORED_MEMORY_PREFIX = "MEM-AUTH-"
 MEMORY_EVENTS_FILE = "events.jsonl"
 GENERATED_MEMORY_FILES = {"current.jsonl"}
 RRF_K = 60
+KOREAN_PARTICLES = (
+    "으로부터",
+    "에서부터",
+    "에게서",
+    "까지는",
+    "에서는",
+    "으로는",
+    "에게",
+    "한테",
+    "께서",
+    "에서",
+    "부터",
+    "까지",
+    "처럼",
+    "보다",
+    "으로",
+    "와",
+    "과",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "의",
+    "에",
+    "도",
+    "만",
+    "로",
+)
+MEETING_QUERY_TERMS = {
+    "기억",
+    "가져와줘",
+    "지난",
+    "지난번",
+    "저번",
+    "회의",
+    "뭐",
+    "얘기",
+    "내용",
+    "나왔지",
+    "나왔어",
+    "알려줘",
+    "말해줘",
+    "정리해줘",
+    "meeting",
+    "minutes",
+}
 COMPILED_TABLES = ("sources", "spans", "memories")
 COMPILED_MANIFEST = "manifest.json"
 SNAPSHOT_VERSION = 1
@@ -101,8 +149,15 @@ def refresh(repo: str | Path) -> dict[str, int]:
         db.close()
 
 
-def build_context(repo: str | Path, question: str, limit: int = 8, mode: str | None = None) -> dict:
+def build_context(
+    repo: str | Path,
+    question: str,
+    limit: int = 8,
+    mode: str | None = None,
+    as_of: str | None = None,
+) -> dict:
     repo = Path(repo)
+    as_of = date.fromisoformat(as_of).isoformat() if as_of else datetime.now().astimezone().date().isoformat()
     requested_mode = _classify_query_mode(question) if mode in (None, "auto", "answer") else mode
     counts = refresh(repo)
     terms = _terms(question)
@@ -117,20 +172,31 @@ def build_context(repo: str | Path, question: str, limit: int = 8, mode: str | N
         project_state = _scope_project_states(project_state, scopes)
         active_decisions = _decision_records(repo, active_only=True, scopes=scopes)
         decision_history = _decision_records(repo, active_only=False, scopes=scopes) if intent == "history" else []
-        spans = _search_rows(db, "spans", "text", terms, limit, question, intent)
-        memory_rows = _search_rows(db, "memories", "content", terms, limit * 4, question, intent)
+        spans = _search_rows(db, "spans", "text", terms, question, intent, as_of)
+        memory_rows = _search_rows(db, "memories", "content", terms, question, intent, as_of)
         excluded_matches: list[dict] = []
+        # ponytail: rank all matches before top-N; add indexed span scope only if corpus growth makes this slow.
         spans = _filter_span_scope(spans, scopes, config, excluded_matches)[:limit]
         memories = _filter_memory_scope(memory_rows, scopes, excluded_matches)[:limit]
         memory_packets = [_memory_packet(db, row) for row in memories]
-        memory_packets, overrides = _apply_local_overrides(memory_packets, project["scope"])
-        related_memories = _expand_related_memories(db, memory_packets, scopes)
+        memory_packets, overrides = _apply_local_overrides(
+            db,
+            memory_packets,
+            project["scope"],
+            scopes,
+            intent,
+            as_of,
+        )
+        related_memories = _expand_related_memories(db, memory_packets, scopes, intent, as_of)
         span_packets = [_span_packet(row, config) for row in spans]
         buckets = _memory_buckets(memory_packets)
+        retrieval = _meeting_retrieval(terms, spans, memories) if intent == "meeting_recall" else {}
         packet = {
             "question": question,
             "mode": query_mode,
             "intent": intent,
+            "as_of": as_of,
+            "retrieval": retrieval,
             "active_project": project["scope"],
             "allowed_scopes": sorted(scopes),
             "refresh": counts,
@@ -201,6 +267,8 @@ def _record_context_run(repo: Path, packet: dict, mode: str) -> None:
         "mode": packet.get("mode", mode),
         "requested_mode": mode,
         "intent": packet.get("intent"),
+        "as_of": packet.get("as_of"),
+        "retrieval": packet.get("retrieval", {}),
         "question": packet["question"],
         "snapshot_id": packet["refresh"]["snapshot_id"],
         "allowed_scopes": packet.get("allowed_scopes", []),
@@ -1764,26 +1832,53 @@ def _memory_buckets(memories: list[dict]) -> dict[str, list[dict]]:
     return buckets
 
 
-def _apply_local_overrides(memories: list[dict], project_scope: str) -> tuple[list[dict], list[dict]]:
-    overrides: list[dict] = []
-    overridden: set[str] = set()
-    for memory in memories:
-        if memory["scope"] != project_scope:
+def _apply_local_overrides(
+    db: sqlite3.Connection,
+    memories: list[dict],
+    project_scope: str,
+    scopes: set[str],
+    intent: str,
+    as_of: str,
+) -> tuple[list[dict], list[dict]]:
+    if intent not in {"current", "evidence"} or not _scope_allowed(project_scope, scopes):
+        return memories, []
+    selected_ids = {memory["id"] for memory in memories}
+    replacements: dict[str, dict] = {}
+    rows = db.execute(
+        "select * from memories where scope = ? and status = 'active'",
+        (project_scope,),
+    ).fetchall()
+    rows.sort(key=lambda row: (*_memory_policy_tiebreak_key(row), row["id"]))
+    for row in rows:
+        if not _memory_visible(row, intent, as_of):
             continue
-        for rel in memory.get("related", []):
+        for rel in _json_list(row["related"]):
             target = rel.get("overrides") if isinstance(rel, dict) else None
-            if target:
-                overridden.add(target)
-                overrides.append({"override": memory["id"], "overrides": target})
-    if not overridden:
-        return memories, overrides
-    return [memory for memory in memories if memory["id"] not in overridden], overrides
+            if target in selected_ids and target not in replacements:
+                replacements[target] = _memory_packet(db, row)
+    if not replacements:
+        return memories, []
+
+    result: list[dict] = []
+    overrides: list[dict] = []
+    seen: set[str] = set()
+    for memory in memories:
+        replacement = replacements.get(memory["id"])
+        candidate = replacement or memory
+        if replacement:
+            overrides.append({"override": replacement["id"], "overrides": memory["id"]})
+        if candidate["id"] not in seen:
+            result.append(candidate)
+            seen.add(candidate["id"])
+    return result, overrides
 
 
 def _expand_related_memories(
     db: sqlite3.Connection,
     memories: list[dict],
     scopes: set[str],
+    intent: str,
+    as_of: str,
     limit: int = 5,
 ) -> list[dict]:
     seen = {memory["id"] for memory in memories}
@@ -1795,8 +1890,12 @@ def _expand_related_memories(
                 related_ids.append(candidate)
     packets: list[dict] = []
     for memory_id in related_ids:
-        row = db.execute("select * from memories where id = ? and status = 'active'", (memory_id,)).fetchone()
-        if not row or not _scope_allowed(_normalize_scope(row["scope"]), scopes):
+        row = db.execute("select * from memories where id = ?", (memory_id,)).fetchone()
+        if (
+            not row
+            or not _memory_visible(row, intent, as_of)
+            or not _scope_allowed(_normalize_scope(row["scope"]), scopes)
+        ):
             continue
         packets.append(_memory_packet(db, row))
         if len(packets) >= limit:
@@ -1808,7 +1907,7 @@ def _related_id(rel) -> str | None:
     if isinstance(rel, str) and rel.startswith("MEM-"):
         return rel
     if isinstance(rel, dict):
-        for key in ("id", "supports", "opposes", "conflicts_with", "supersedes", "overrides"):
+        for key in ("id", "supports", "opposes", "conflicts_with", "supersedes"):
             value = rel.get(key)
             if isinstance(value, str) and value.startswith("MEM-"):
                 return value
@@ -1978,6 +2077,35 @@ def _terms(question: str) -> list[str]:
     return terms
 
 
+def _term_variants(term: str) -> tuple[str, ...]:
+    for particle in KOREAN_PARTICLES:
+        if term.endswith(particle) and len(term) - len(particle) >= 2:
+            return term, term[: -len(particle)]
+    return (term,)
+
+
+def _expanded_terms(terms: list[str]) -> list[str]:
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        for variant in _term_variants(term):
+            key = variant.casefold()
+            if key not in seen:
+                expanded.append(variant)
+                seen.add(key)
+    return expanded
+
+
+def _meeting_content_terms(terms: list[str]) -> list[str]:
+    result: list[str] = []
+    for term in terms:
+        base = _term_variants(term)[-1].casefold()
+        if base in MEETING_QUERY_TERMS or re.fullmatch(r"(?:기억나|나왔나|했지|했어|했었지)", base):
+            continue
+        result.append(term)
+    return result
+
+
 def _meeting_source(rel: str) -> bool:
     return rel.startswith("회의록/") or rel.startswith(".team-ai/sources/meetings/") or "/sources/meetings/" in rel
 
@@ -2036,9 +2164,19 @@ def _source_ref_equivalent(left: str, right: str) -> bool:
 
 
 def _query_intent(question: str) -> str:
-    if re.search(r"예전|과거|이전|전에는|변경|바뀌|왜 .*됐|왜.*바뀌|히스토리|history", question, re.I):
+    if re.search(
+        r"(?<![가-힣])(?:(?:예전|과거|이전)(?:에는|에)?|전에는)(?![가-힣])|"
+        r"변경|바뀌|왜 .*됐|왜.*바뀌|히스토리|history",
+        question,
+        re.I,
+    ):
         return "history"
-    if re.search(r"회의|지난번|뭔 얘기|뭐 나왔|브레인스토밍|meeting|minutes", question, re.I):
+    if re.search(
+        r"회의|지난번|저번|뭔 얘기|뭐 나왔|"
+        r"브레인스토밍.*(?:나왔|했었|기억|지난|저번)|meeting|minutes",
+        question,
+        re.I,
+    ):
         return "meeting_recall"
     if re.search(r"원문|근거|자료|파일|source|evidence", question, re.I):
         return "evidence"
@@ -2054,40 +2192,44 @@ def _search_rows(
     table: str,
     column: str,
     terms: list[str],
-    limit: int,
     question: str = "",
     intent: str = "current",
+    as_of: str = "",
 ):
     if table == "spans":
-        return _search_spans(db, terms, limit, question, intent)
+        return _search_spans(db, terms, question, intent)
     if table == "memories":
-        return _search_memories(db, terms, limit, question, intent)
+        return _search_memories(db, terms, question, intent, as_of)
     order = _search_order(table)
     if not terms:
-        return db.execute(f"select * from {table}{order} limit ?", (limit,)).fetchall()
+        return db.execute(f"select * from {table}{order}").fetchall()
     where = " or ".join([f"{column} like ?" for _ in terms])
     params = [f"%{term}%" for term in terms]
-    rows = db.execute(f"select * from {table} where {where}{order} limit ?", (*params, limit)).fetchall()
-    if rows:
-        return rows
-    return db.execute(f"select * from {table}{order} limit ?", (limit,)).fetchall()
+    return db.execute(f"select * from {table} where {where}{order}", params).fetchall()
 
 
-def _search_spans(db: sqlite3.Connection, terms: list[str], limit: int, question: str, intent: str):
+def _search_spans(db: sqlite3.Connection, terms: list[str], question: str, intent: str):
     if intent == "meeting_recall":
-        return _search_meeting_spans(db, terms, limit, question)
+        return _search_meeting_spans(db, terms, question)
     if not terms:
-        rows = db.execute("select * from spans limit ?", (limit * 2,)).fetchall()
-        return _filter_span_rows(rows, intent)[:limit]
-    ids = _fuse_ranked_ids(
+        return _filter_span_rows(db.execute("select * from spans").fetchall(), intent)
+    ranked = _fuse_ranked_scores(
         _fts_ids(db, "spans_fts", terms),
         _fts_ids(db, "spans_trigram", terms),
         _like_ids(db, "spans", "text", terms, question, extra_columns=("source_ref",)),
     )
-    rank_by_id = {row_id: rank for rank, row_id in enumerate(ids)}
+    ids = [row_id for row_id, _ in ranked]
+    score_by_id = dict(ranked)
     rows = _filter_span_rows(_rows_for_ids(db, "spans", ids, len(ids)), intent)
-    rows.sort(key=lambda row: (*_span_policy_key(row), rank_by_id.get(row["id"], len(ids)), row["id"]))
-    return rows[:limit]
+    rows.sort(
+        key=lambda row: (
+            -_text_score(row, "text", terms, question, ("source_ref",)),
+            -score_by_id.get(row["id"], 0.0),
+            *_span_policy_key(row),
+            row["id"],
+        )
+    )
+    return rows
 
 
 def _filter_span_rows(rows: list[sqlite3.Row], intent: str) -> list[sqlite3.Row]:
@@ -2104,35 +2246,75 @@ def _span_policy_key(row: sqlite3.Row) -> tuple:
     )
 
 
-def _search_memories(db: sqlite3.Connection, terms: list[str], limit: int, question: str, intent: str):
+def _search_memories(
+    db: sqlite3.Connection,
+    terms: list[str],
+    question: str,
+    intent: str,
+    as_of: str,
+):
     if intent == "meeting_recall":
-        return _search_meeting_memories(db, terms, limit, question)
-    status_clause = "" if intent == "history" else " where status = 'active'"
+        return _search_meeting_memories(db, terms, question)
     if not terms:
-        return db.execute(f"select * from memories{status_clause}{_search_order('memories')} limit ?", (limit,)).fetchall()
-    ids = _fuse_ranked_ids(
+        rows = db.execute(f"select * from memories{_search_order('memories')}").fetchall()
+        return [row for row in rows if _memory_visible(row, intent, as_of)]
+    ranked = _fuse_ranked_scores(
         _fts_ids(db, "memories_fts", terms),
         _fts_ids(db, "memories_trigram", terms),
         _like_ids(db, "memories", "content", terms, question, extra_columns=("canonical_key",)),
     )
-    rank_by_id = {row_id: rank for rank, row_id in enumerate(ids)}
+    ids = [row_id for row_id, _ in ranked]
+    score_by_id = dict(ranked)
     rows = _rows_for_ids(db, "memories", ids, len(ids))
-    if intent != "history":
-        rows = [row for row in rows if row["status"] == "active"]
-    rows.sort(key=lambda row: (*_memory_policy_key(row), rank_by_id.get(row["id"], len(ids))))
-    return rows[:limit]
+    rows = [row for row in rows if _memory_visible(row, intent, as_of)]
+    rows.sort(
+        key=lambda row: (
+            -_text_score(row, "content", terms, question, ("canonical_key",)),
+            -score_by_id.get(row["id"], 0.0),
+            *_memory_policy_tiebreak_key(row),
+            row["id"],
+        )
+    )
+    return rows
 
 
-def _search_meeting_spans(db: sqlite3.Connection, terms: list[str], limit: int, question: str):
-    rows = db.execute("select * from spans where source_type = 'meeting_note' order by source_ref desc, span_index").fetchall()
-    if terms:
-        scored = [(row, _text_score(row, "text", terms, question, ("source_ref",))) for row in rows]
-        rows = [row for row, score in sorted(scored, key=lambda item: item[1], reverse=True) if score > 0] or rows
+def _memory_visible(row: sqlite3.Row, intent: str, as_of: str) -> bool:
+    if intent == "history":
+        return True
+    if row["status"] != "active":
+        return False
+    if intent not in {"current", "evidence"}:
+        return True
+    return (not row["valid_from"] or row["valid_from"] <= as_of) and (
+        not row["valid_to"] or as_of < row["valid_to"]
+    )
+
+
+def _search_meeting_spans(db: sqlite3.Connection, terms: list[str], question: str):
+    rows = db.execute(
+        """
+        select * from spans
+        where source_type = 'meeting_note'
+          and lower(source_ref) not like '%/readme.md#%'
+        order by source_ref desc, span_index
+        """
+    ).fetchall()
+    content_terms = _meeting_content_terms(terms)
+    if content_terms:
+        scored = [(row, _text_score(row, "text", content_terms, question, ("source_ref",))) for row in rows]
+        rows = [
+            row
+            for row, score in sorted(
+                scored,
+                key=lambda item: (-item[1], *_span_policy_key(item[0]), item[0]["id"]),
+            )
+            if score > 0
+        ]
     rows = _representative_sources_first(rows)
-    return _filter_span_rows(rows, "current")[:limit]
+    return _filter_span_rows(rows, "current")
 
 
-def _search_meeting_memories(db: sqlite3.Connection, terms: list[str], limit: int, question: str):
+def _search_meeting_memories(db: sqlite3.Connection, terms: list[str], question: str):
     rows = db.execute(
         """
         select * from memories
@@ -2140,15 +2322,23 @@ def _search_meeting_memories(db: sqlite3.Connection, terms: list[str], limit: in
           and (
             source_refs like '%/sources/meetings/%'
             or source_refs like '%회의록/%'
-            or kind in ('discussion', 'principle', 'open_question', 'decision')
+            or kind = 'discussion'
           )
+        order by coalesce(occurred_at, valid_from, '') desc, id
         """
     ).fetchall()
-    if terms:
-        scored = [(row, _text_score(row, "content", terms, question, ("canonical_key",))) for row in rows]
-        rows = [row for row, score in sorted(scored, key=lambda item: item[1], reverse=True) if score > 0] or rows
-    rows.sort(key=_memory_policy_key)
-    return rows[:limit]
+    content_terms = _meeting_content_terms(terms)
+    if content_terms:
+        scored = [(row, _text_score(row, "content", content_terms, question, ("canonical_key",))) for row in rows]
+        rows = [
+            row
+            for row, score in sorted(
+                scored,
+                key=lambda item: (-item[1], *_memory_policy_tiebreak_key(item[0]), item[0]["id"]),
+            )
+            if score > 0
+        ]
+    return rows
 
 
 def _representative_sources_first(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
@@ -2165,10 +2355,26 @@ def _representative_sources_first(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
     return first + rest
 
 
+def _meeting_retrieval(terms: list[str], spans: list[sqlite3.Row], memories: list[sqlite3.Row]) -> dict:
+    content_terms = _meeting_content_terms(terms)
+    normalized_terms = list(dict.fromkeys(_term_variants(term)[-1] for term in content_terms))
+    if content_terms:
+        status = "matched" if spans or memories else "no_match"
+        match_type = "literal" if status == "matched" else None
+    else:
+        status = "recent_fallback" if spans or memories else "no_match"
+        match_type = "recent" if status == "recent_fallback" else None
+    return {
+        "status": status,
+        "match_type": match_type,
+        "content_terms": normalized_terms,
+    }
+
+
 def _fts_ids(db: sqlite3.Connection, table: str, terms: list[str]) -> list[str]:
     if not _has_search_indexes(db):
         return []
-    query = " OR ".join(_quote_fts(term) for term in terms)
+    query = " OR ".join(_quote_fts(term) for term in _expanded_terms(terms))
     try:
         rows = db.execute(f"select id from {table} where {table} match ? order by rank", (query,)).fetchall()
     except sqlite3.OperationalError:
@@ -2188,29 +2394,32 @@ def _like_ids(
     question: str,
     extra_columns: tuple[str, ...] = (),
 ) -> list[str]:
+    search_terms = _expanded_terms(terms)
     columns = (column, *extra_columns)
-    where = " or ".join(f"coalesce({col}, '') like ?" for col in columns for _ in terms)
-    params = [f"%{term}%" for _ in columns for term in terms]
+    where = " or ".join(f"coalesce({col}, '') like ?" for col in columns for _ in search_terms)
+    params = [f"%{term}%" for _ in columns for term in search_terms]
     rows = db.execute(f"select * from {table} where {where}", params).fetchall()
     rows = sorted(rows, key=lambda row: _text_score(row, column, terms, question, extra_columns), reverse=True)
     return [row["id"] for row in rows]
 
 
 def _text_score(row: sqlite3.Row, column: str, terms: list[str], question: str, extra_columns: tuple[str, ...]) -> int:
-    haystack = " ".join(str(row[col] or "") for col in (column, *extra_columns)).lower()
-    question_lower = question.lower()
-    score = 1000 if question_lower and question_lower in haystack else 0
-    score += sum(len(term) * 10 for term in terms if term.lower() in haystack)
-    score += sum(1 for term in terms if term.lower() in haystack)
+    haystack = " ".join(str(row[col] or "") for col in (column, *extra_columns)).casefold()
+    question_folded = question.casefold()
+    score = 1000 if question_folded and question_folded in haystack else 0
+    for term in terms:
+        matches = [variant for variant in _term_variants(term) if variant.casefold() in haystack]
+        if matches:
+            score += len(max(matches, key=len)) * 10 + 1
     return score
 
 
-def _fuse_ranked_ids(*ranked_lists: list[str]) -> list[str]:
+def _fuse_ranked_scores(*ranked_lists: list[str]) -> list[tuple[str, float]]:
     scores: dict[str, float] = {}
     for ranked in ranked_lists:
         for rank, row_id in enumerate(ranked, 1):
             scores[row_id] = scores.get(row_id, 0.0) + 1.0 / (RRF_K + rank)
-    return [row_id for row_id, _ in sorted(scores.items(), key=lambda item: (-item[1], item[0]))]
+    return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
 
 
 def _rows_for_ids(db: sqlite3.Connection, table: str, ids: list[str], limit: int):
@@ -2223,14 +2432,13 @@ def _rows_for_ids(db: sqlite3.Connection, table: str, ids: list[str], limit: int
     return [by_id[row_id] for row_id in selected if row_id in by_id]
 
 
-def _memory_policy_key(row: sqlite3.Row) -> tuple:
+def _memory_policy_tiebreak_key(row: sqlite3.Row) -> tuple:
     scope = _normalize_scope(row["scope"])
     return (
         0 if row["status"] == "active" else 1,
         0 if row["id"].startswith(AUTHORED_MEMORY_PREFIX) else 1,
         _authority_rank(row["authority"]),
-        0 if scope == "team" or scope.startswith(("project:", "org:", "harness:")) else 1,
-        row["id"],
+        0 if scope == "team" or scope.startswith(("project:", "org:", "harness:", "program:")) else 1,
     )
 
 
@@ -2263,6 +2471,7 @@ def _search_order(table: str) -> str:
                 when scope like 'project:%' then 0
                 when scope like 'org:%' then 0
                 when scope like 'harness:%' then 0
+                when scope like 'program:%' then 0
                 else 1
             end,
             id

@@ -288,7 +288,7 @@ class TeamAiRuntimeTest(unittest.TestCase):
             memory_file.unlink()
             self.assertEqual(refresh(repo)["memories"], 0)
 
-    def test_build_context_prioritizes_authored_memory(self):
+    def test_build_context_prioritizes_more_relevant_authored_memory(self):
         from tempfile import TemporaryDirectory
 
         from team_ai.runtime import build_context
@@ -322,7 +322,7 @@ class TeamAiRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            packet = build_context(repo, "프로젝트 방향", limit=1)
+            packet = build_context(repo, "프로젝트 방향 해야 할 일 결정 기준", limit=1)
 
             self.assertEqual(packet["memories"][0]["id"], "MEM-AUTH-0009")
 
@@ -576,7 +576,8 @@ class TeamAiRuntimeTest(unittest.TestCase):
             self.assertEqual(packet["intent"], "meeting_recall")
             self.assertIn("program:finance-ai-ideation", packet["allowed_scopes"])
             self.assertNotIn("harness:team-ai", packet["allowed_scopes"])
-            self.assertEqual(packet["memories"][0]["id"], "MEM-AUTH-FIN-0001")
+            self.assertIn("MEM-AUTH-FIN-0001", [memory["id"] for memory in packet["memories"]])
+            self.assertEqual(packet["retrieval"]["status"], "recent_fallback")
             source_refs = [span["source_ref"] for span in packet["source_evidence"][:2]]
             self.assertTrue(any("2026.06.25 meeting.md" in ref for ref in source_refs))
             self.assertTrue(any("2026.06.26 meeting.md" in ref for ref in source_refs))
@@ -1136,6 +1137,304 @@ class TeamAiRuntimeTest(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "compiled snapshot hash mismatch"):
                 build_context(repo, "tampered")
+
+    def test_memory_ranking_uses_rrf_before_policy_and_policy_only_for_ties(self):
+        from tempfile import TemporaryDirectory
+
+        from team_ai.runtime import _search_memories, refresh
+
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            memory_dir = repo / ".team-ai" / "memory"
+            memory_dir.mkdir(parents=True)
+            high_id = "MEM-AUTH-HIGH"
+            low_id = "MEM-AUTH-LOW"
+            memories = [
+                {
+                    "id": high_id,
+                    "kind": "principle",
+                    "scope": "team",
+                    "content": "same literal",
+                    "authority": "user_explicit",
+                    "origin": "user",
+                    "status": "active",
+                    "source_refs": [],
+                    "related": [],
+                },
+                {
+                    "id": low_id,
+                    "kind": "principle",
+                    "scope": "team",
+                    "content": "same literal",
+                    "authority": "individual_opinion",
+                    "origin": "user",
+                    "status": "active",
+                    "source_refs": [],
+                    "related": [],
+                },
+            ]
+            (memory_dir / "curated.jsonl").write_text(
+                "".join(json.dumps(memory, ensure_ascii=False) + "\n" for memory in memories),
+                encoding="utf-8",
+            )
+            refresh(repo)
+            db = sqlite3.connect(repo / ".team-ai" / "local" / "knowledge.sqlite")
+            db.row_factory = sqlite3.Row
+            try:
+                with mock.patch(
+                    "team_ai.runtime._fts_ids",
+                    side_effect=[[low_id, high_id], [low_id, high_id]],
+                ), mock.patch("team_ai.runtime._like_ids", return_value=[low_id, high_id]):
+                    ranked = _search_memories(db, ["same", "literal"], "same literal", "current", "2026-07-16")
+                self.assertEqual(ranked[0]["id"], low_id)
+
+                with mock.patch(
+                    "team_ai.runtime._fts_ids",
+                    side_effect=[[low_id, high_id], [high_id, low_id]],
+                ), mock.patch("team_ai.runtime._like_ids", return_value=[]):
+                    tied = _search_memories(db, ["same", "literal"], "same literal", "current", "2026-07-16")
+                self.assertEqual(tied[0]["id"], high_id)
+            finally:
+                db.close()
+
+    def test_meeting_recall_handles_korean_particles_fallback_and_no_match(self):
+        from tempfile import TemporaryDirectory
+
+        from team_ai.runtime import _query_intent, _text_score, build_context
+
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            meeting_dir = repo / ".team-ai" / "sources" / "meetings"
+            memory_dir = repo / ".team-ai" / "memory"
+            meeting_dir.mkdir(parents=True)
+            memory_dir.mkdir(parents=True)
+            (meeting_dir / "2026.07.14 meeting.md").write_text(
+                "브레인스토밍을 통해 모델 데이터 에이전트 로직을 논의했다.",
+                encoding="utf-8",
+            )
+            (meeting_dir / "README.md").write_text("회의 자료 사용법", encoding="utf-8")
+            (memory_dir / "curated.jsonl").write_text(
+                json.dumps(
+                    {
+                        "id": "MEM-AUTH-NONMEETING",
+                        "kind": "decision",
+                        "scope": "project:finance-architecture",
+                        "content": "쿠버네티스 마이그레이션은 다음 결정이다.",
+                        "authority": "user_explicit",
+                        "origin": "user",
+                        "status": "active",
+                        "source_refs": [],
+                        "related": [],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            recent = build_context(repo, "지난번 회의에서 뭐 나왔지?")
+            matched = build_context(repo, "브레인스토밍에서 뭐 나왔지?")
+            missing = build_context(repo, "쿠버네티스 마이그레이션 회의에서 뭐 나왔지?")
+
+            self.assertEqual(recent["retrieval"]["status"], "recent_fallback")
+            self.assertTrue(recent["source_evidence"])
+            self.assertFalse(any("README.md" in span["source_ref"] for span in recent["source_evidence"]))
+            self.assertEqual(matched["intent"], "meeting_recall")
+            self.assertEqual(matched["retrieval"]["status"], "matched")
+            self.assertIn("브레인스토밍을", matched["source_evidence"][0]["text"])
+            self.assertEqual(missing["retrieval"]["status"], "no_match")
+            self.assertEqual(missing["source_evidence"], [])
+            self.assertEqual(missing["memories"], [])
+            self.assertEqual(_query_intent("에이전트 로직 저번 회의에서 뭐 나왔지?"), "meeting_recall")
+            self.assertEqual(_query_intent("새 프로젝트 아이디어를 브레인스토밍해줘"), "current")
+            self.assertEqual(
+                _text_score(
+                    {"content": "브레인스토밍에서", "canonical_key": ""},
+                    "content",
+                    ["브레인스토밍에서"],
+                    "",
+                    ("canonical_key",),
+                ),
+                len("브레인스토밍에서") * 10 + 1,
+            )
+
+    def test_current_memory_filters_temporal_validity_before_limit(self):
+        from tempfile import TemporaryDirectory
+
+        from team_ai.runtime import build_context
+
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            memory_dir = repo / ".team-ai" / "memory"
+            memory_dir.mkdir(parents=True)
+            memories = [
+                {
+                    "id": "MEM-AUTH-EXPIRED",
+                    "kind": "decision",
+                    "scope": "team",
+                    "content": "temporal 정책 expired",
+                    "authority": "user_explicit",
+                    "origin": "user",
+                    "status": "active",
+                    "source_refs": [],
+                    "related": [],
+                    "valid_to": "2026-07-16",
+                },
+                {
+                    "id": "MEM-AUTH-FUTURE",
+                    "kind": "decision",
+                    "scope": "team",
+                    "content": "temporal 정책 future",
+                    "authority": "user_explicit",
+                    "origin": "user",
+                    "status": "active",
+                    "source_refs": [],
+                    "related": [],
+                    "valid_from": "2026-07-17",
+                },
+                {
+                    "id": "MEM-AUTH-CURRENT",
+                    "kind": "decision",
+                    "scope": "team",
+                    "content": "temporal 정책 current",
+                    "authority": "user_explicit",
+                    "origin": "user",
+                    "status": "active",
+                    "source_refs": [],
+                    "related": [],
+                    "valid_from": "2026-07-01",
+                    "valid_to": "2026-08-01",
+                },
+            ]
+            (memory_dir / "curated.jsonl").write_text(
+                "".join(json.dumps(memory, ensure_ascii=False) + "\n" for memory in memories),
+                encoding="utf-8",
+            )
+
+            current = build_context(repo, "temporal 정책", as_of="2026-07-16")
+            evidence = build_context(repo, "temporal 정책 근거", as_of="2026-07-16")
+            history = build_context(repo, "temporal 정책은 예전에 어땠어?", as_of="2026-07-16")
+
+            self.assertEqual([memory["id"] for memory in current["memories"]], ["MEM-AUTH-CURRENT"])
+            self.assertEqual([memory["id"] for memory in evidence["memories"]], ["MEM-AUTH-CURRENT"])
+            self.assertEqual(
+                {memory["id"] for memory in history["memories"]},
+                {"MEM-AUTH-EXPIRED", "MEM-AUTH-FUTURE", "MEM-AUTH-CURRENT"},
+            )
+
+    def test_project_override_replaces_lexical_match_without_readding_target(self):
+        from tempfile import TemporaryDirectory
+
+        from team_ai.runtime import build_context
+
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            memory_dir = repo / ".team-ai" / "memory"
+            memory_dir.mkdir(parents=True)
+            memories = [
+                {
+                    "id": "MEM-AUTH-SHARED-SQLITE",
+                    "kind": "decision",
+                    "scope": "team",
+                    "content": "SQLite 정책 unique는 공유 기본값이다.",
+                    "authority": "user_explicit",
+                    "origin": "user",
+                    "status": "active",
+                    "source_refs": [],
+                    "related": [],
+                },
+                {
+                    "id": "MEM-AUTH-PROJECT-POSTGRES",
+                    "kind": "decision",
+                    "scope": "project:finance-architecture",
+                    "content": "프로젝트 규모상 PostgreSQL로 전환한다.",
+                    "authority": "user_explicit",
+                    "origin": "user",
+                    "status": "active",
+                    "source_refs": [],
+                    "related": [{"overrides": "MEM-AUTH-SHARED-SQLITE"}],
+                },
+            ]
+            (memory_dir / "curated.jsonl").write_text(
+                "".join(json.dumps(memory, ensure_ascii=False) + "\n" for memory in memories),
+                encoding="utf-8",
+            )
+
+            packet = build_context(repo, "SQLite 정책 unique")
+
+            self.assertEqual([memory["id"] for memory in packet["memories"]], ["MEM-AUTH-PROJECT-POSTGRES"])
+            self.assertEqual(packet["overrides"], [{"override": "MEM-AUTH-PROJECT-POSTGRES", "overrides": "MEM-AUTH-SHARED-SQLITE"}])
+            self.assertNotIn("MEM-AUTH-SHARED-SQLITE", [memory["id"] for memory in packet["related_memories"]])
+
+    def test_scope_filter_runs_before_final_memory_and_span_limit(self):
+        from tempfile import TemporaryDirectory
+
+        from team_ai.runtime import build_context
+
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            memory_dir = repo / ".team-ai" / "memory"
+            memory_dir.mkdir(parents=True)
+            (repo / "other").mkdir()
+            (repo / "allowed").mkdir()
+            (repo / ".team-ai" / "config.yaml").write_text(
+                "source_roots:\n"
+                "  - other\n"
+                "  - allowed\n"
+                "scope_inference:\n"
+                "  - path: other/**\n"
+                "    scope: project:other\n"
+                "  - path: allowed/**\n"
+                "    scope: project:allowed\n",
+                encoding="utf-8",
+            )
+            (repo / ".team-ai" / "project.yaml").write_text(
+                "project_id: allowed\n"
+                "scope: project:allowed\n"
+                "scope_modes:\n"
+                "  normal:\n"
+                "    include:\n"
+                "      - project:allowed\n",
+                encoding="utf-8",
+            )
+            (repo / "other" / "noise.md").write_text("needle target unique", encoding="utf-8")
+            (repo / "allowed" / "answer.md").write_text("unique needle target allowed", encoding="utf-8")
+            memories = [
+                {
+                    "id": f"MEM-AUTH-OTHER-{index}",
+                    "kind": "principle",
+                    "scope": "project:other",
+                    "content": "needle target unique",
+                    "authority": "user_explicit",
+                    "origin": "user",
+                    "status": "active",
+                    "source_refs": [],
+                    "related": [],
+                }
+                for index in range(5)
+            ]
+            memories.append(
+                {
+                    "id": "MEM-AUTH-ALLOWED",
+                    "kind": "principle",
+                    "scope": "project:allowed",
+                    "content": "unique needle target allowed",
+                    "authority": "individual_opinion",
+                    "origin": "user",
+                    "status": "active",
+                    "source_refs": [],
+                    "related": [],
+                }
+            )
+            (memory_dir / "curated.jsonl").write_text(
+                "".join(json.dumps(memory, ensure_ascii=False) + "\n" for memory in memories),
+                encoding="utf-8",
+            )
+
+            packet = build_context(repo, "needle target unique", limit=1)
+
+            self.assertEqual(packet["memories"][0]["id"], "MEM-AUTH-ALLOWED")
+            self.assertEqual(packet["source_evidence"][0]["source_ref"], "allowed/answer.md#page=1")
 
     def test_memory_search_is_limited_to_target_scopes(self):
         from tempfile import TemporaryDirectory

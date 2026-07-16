@@ -25,16 +25,23 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _summary(packet: dict, mode: str) -> str:
+    retrieval = packet.get("retrieval") or {}
     lines = [
         "Harness context loaded",
         f"snapshot: {packet['refresh']['snapshot_id']}",
         f"mode: {packet.get('mode', mode)}",
         f"intent: {packet.get('intent', 'current')}",
-        f"allowed scopes: {', '.join(packet.get('allowed_scopes', []))}",
-        f"projects: {', '.join(sorted(packet.get('project_state', {})))}",
-        "",
-        "Active decisions:",
     ]
+    if retrieval:
+        lines.append(f"retrieval: {retrieval.get('status', 'no_match')}")
+    lines.extend(
+        [
+            f"allowed scopes: {', '.join(packet.get('allowed_scopes', []))}",
+            f"projects: {', '.join(sorted(packet.get('project_state', {})))}",
+            "",
+            "Active decisions:",
+        ]
+    )
     decisions = packet.get("active_decisions") or []
     lines.extend(f"- {item.get('id')}: {item.get('title')}" for item in decisions[:5])
     if not decisions:
