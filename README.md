@@ -49,6 +49,7 @@ From this repo root, Codex or Claude can answer finance ideation recall question
 
 ```bash
 team-ai context "회의 때 뭔 얘기 나왔지?"
+team-ai context --current-state "지금 목표와 다음 할 일은?"
 ```
 
 Create a connected project from the workspace root:

@@ -7,6 +7,7 @@ It provides the `team-ai` CLI:
 
 ```bash
 team-ai context "question"
+team-ai context --current-state "project-wide status question"
 team-ai context --mode implementation "request"
 team-ai refresh
 team-ai verify

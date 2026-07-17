@@ -273,6 +273,15 @@ direction, or implementation direction, run:
 team-ai context "USER_REQUEST"
 ```
 
+For broad project-wide questions about the current goal, status, next actions,
+or unresolved decisions, decide the meaning at the agent layer and run:
+
+```bash
+team-ai context --current-state "USER_REQUEST"
+```
+
+Use ordinary context search for questions about a specific named topic.
+
 Before changing product code under `src/` or `tests/`, run:
 
 ```bash

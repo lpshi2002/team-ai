@@ -749,6 +749,9 @@ class TeamAiRuntimeTest(unittest.TestCase):
             self.assertIn(new_memory["content"], current_contents)
             self.assertNotIn(old_memory["content"], current_contents)
 
+            past_packet = build_context(repo, "RAG 정책의 현재 상태", limit=5, as_of="2026-06-25")
+            self.assertEqual([memory["id"] for memory in past_packet["memories"]], [old_memory["id"]])
+
             history_packet = build_context(repo, "RAG 정책은 왜 바뀌었어?", limit=5)
             history_by_content = {memory["content"]: memory["status"] for memory in history_packet["memories"]}
             self.assertEqual(history_by_content[old_memory["content"]], "superseded")
@@ -1196,6 +1199,86 @@ class TeamAiRuntimeTest(unittest.TestCase):
                 self.assertEqual(tied[0]["id"], high_id)
             finally:
                 db.close()
+
+    def test_explicit_current_state_view_uses_structured_memory_without_changing_search(self):
+        from tempfile import TemporaryDirectory
+
+        from team_ai.runtime import build_context
+
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            memory_dir = repo / ".team-ai" / "memory"
+            memory_dir.mkdir(parents=True)
+
+            def memory(memory_id, kind, content, valid_from, authority="user_explicit"):
+                sourced = authority in {"individual_opinion", "external_knowledge"}
+                item = {
+                    "id": memory_id,
+                    "kind": kind,
+                    "scope": "project:finance-architecture",
+                    "content": content,
+                    "authority": authority,
+                    "origin": "source" if sourced else "user",
+                    "status": "active",
+                    "source_refs": ["reference:test"] if sourced else [],
+                    "related": [],
+                    "valid_from": valid_from,
+                }
+                if authority == "team_explicit":
+                    item.update(approved_by="user", approved_at=valid_from)
+                return item
+
+            memories = [
+                memory("MEM-AUTH-ORCHID-TASK", "task", "Orchid 방법론을 먼저 확정한 뒤 후보를 고른다.", "2026-07-15"),
+                memory("MEM-AUTH-ORCHID-GOAL", "decision", "Orchid 검증을 최우선으로 9월까지 완료한다.", "2026-07-14"),
+                memory(
+                    "MEM-AUTH-ORCHID-PROTOCOL",
+                    "open_question",
+                    "Orchid 3단계를 당분간 사용하며 판정 기준은 아직 결정해야 한다.",
+                    "2026-07-16",
+                    "team_explicit",
+                ),
+                memory(
+                    "MEM-AUTH-AUTO-ORCHID-OLD",
+                    "decision",
+                    "[보류] Orchid 3단계 사용",
+                    "2026-07-13",
+                    "individual_opinion",
+                ),
+                memory(
+                    "MEM-AUTH-EXTERNAL-ORCHID",
+                    "decision",
+                    "Orchid 3단계와 SEC retention policy를 설명하는 외부 참고자료다.",
+                    "2026-07-16",
+                    "external_knowledge",
+                ),
+                memory("MEM-AUTH-ORCHID-PRINCIPLE", "principle", "Orchid 판단의 일반 원칙이다.", "2026-07-16"),
+            ]
+            (memory_dir / "curated.jsonl").write_text(
+                "".join(json.dumps(memory, ensure_ascii=False) + "\n" for memory in memories),
+                encoding="utf-8",
+            )
+
+            korean = build_context(repo, "지금 메모리를 보고 이제 해야 할 게 뭔지", current_state=True)
+            english = build_context(repo, "Where do we stand?", current_state=True)
+            normal = build_context(repo, "Orchid 3단계의 현재 상태", limit=10)
+            implementation = build_context(repo, "현재 상태 관리 코드를 수정해줘", mode="implementation")
+
+            expected = [
+                "MEM-AUTH-ORCHID-TASK",
+                "MEM-AUTH-ORCHID-GOAL",
+                "MEM-AUTH-ORCHID-PROTOCOL",
+                "MEM-AUTH-AUTO-ORCHID-OLD",
+            ]
+            self.assertEqual([item["id"] for item in korean["memories"]], expected)
+            self.assertEqual([item["id"] for item in english["memories"]], expected)
+            self.assertEqual(korean["retrieval_view"], "current_state")
+            self.assertEqual(korean["source_evidence"], [])
+            normal_ids = {item["id"] for item in normal["memories"]}
+            self.assertIn("MEM-AUTH-EXTERNAL-ORCHID", normal_ids)
+            self.assertIn("MEM-AUTH-ORCHID-PRINCIPLE", normal_ids)
+            self.assertEqual(normal["retrieval_view"], "search")
+            self.assertEqual(implementation["retrieval_view"], "search")
 
     def test_meeting_recall_handles_korean_particles_fallback_and_no_match(self):
         from tempfile import TemporaryDirectory

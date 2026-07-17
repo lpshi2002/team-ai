@@ -25,6 +25,31 @@ class CliInitTest(unittest.TestCase):
             self.assertIn("path: ../team-ai/shared/packs/harness-team-ai", text)
             self.assertTrue((project / "src" / "alpha_project" / "__init__.py").exists())
             self.assertTrue((project / ".team-ai" / "sources" / "meetings").is_dir())
+            self.assertIn("team-ai context --current-state", (project / "AGENTS.md").read_text(encoding="utf-8"))
+
+    def test_context_cli_forwards_explicit_current_state_view(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest import mock
+
+        from team_ai.context import main
+
+        packet = {
+            "refresh": {"snapshot_id": "test"},
+            "mode": "normal",
+            "intent": "current",
+            "retrieval_view": "current_state",
+        }
+        with mock.patch("team_ai.context.build_context", return_value=packet) as build, redirect_stdout(StringIO()):
+            self.assertEqual(main(["--current-state", "Where", "do", "we", "stand?"]), 0)
+
+        build.assert_called_once_with(
+            ".",
+            "Where do we stand?",
+            limit=8,
+            mode="auto",
+            current_state=True,
+        )
 
     def test_init_project_keeps_default_idea_pack(self):
         from team_ai.cli import main
