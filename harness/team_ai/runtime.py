@@ -70,6 +70,8 @@ MEETING_QUERY_TERMS = {
     "meeting",
     "minutes",
 }
+CURRENT_STATE_MEMORY_KINDS = {"decision", "open_question", "preference", "task"}
+CURRENT_STATE_AUTHORITIES = {"individual_opinion", "project_observation", "team_explicit", "user_explicit"}
 COMPILED_TABLES = ("sources", "spans", "memories")
 COMPILED_MANIFEST = "manifest.json"
 SNAPSHOT_VERSION = 1
@@ -155,13 +157,14 @@ def build_context(
     limit: int = 8,
     mode: str | None = None,
     as_of: str | None = None,
+    current_state: bool = False,
 ) -> dict:
     repo = Path(repo)
     as_of = date.fromisoformat(as_of).isoformat() if as_of else datetime.now().astimezone().date().isoformat()
     requested_mode = _classify_query_mode(question) if mode in (None, "auto", "answer") else mode
     counts = refresh(repo)
-    terms = _terms(question)
-    intent = _query_intent(question)
+    intent = "current" if current_state else _query_intent(question)
+    terms = [] if current_state else _terms(question)
     config = load_config(repo)
     db = _connect(repo)
     try:
@@ -172,8 +175,12 @@ def build_context(
         project_state = _scope_project_states(project_state, scopes)
         active_decisions = _decision_records(repo, active_only=True, scopes=scopes)
         decision_history = _decision_records(repo, active_only=False, scopes=scopes) if intent == "history" else []
-        spans = _search_rows(db, "spans", "text", terms, question, intent, as_of)
-        memory_rows = _search_rows(db, "memories", "content", terms, question, intent, as_of)
+        if current_state:
+            spans = []
+            memory_rows = _search_current_state_memories(db, as_of)
+        else:
+            spans = _search_rows(db, "spans", "text", terms, question, intent, as_of)
+            memory_rows = _search_rows(db, "memories", "content", terms, question, intent, as_of)
         excluded_matches: list[dict] = []
         # ponytail: rank all matches before top-N; add indexed span scope only if corpus growth makes this slow.
         spans = _filter_span_scope(spans, scopes, config, excluded_matches)[:limit]
@@ -195,6 +202,7 @@ def build_context(
             "question": question,
             "mode": query_mode,
             "intent": intent,
+            "retrieval_view": "current_state" if current_state else "search",
             "as_of": as_of,
             "retrieval": retrieval,
             "active_project": project["scope"],
@@ -2278,16 +2286,48 @@ def _search_memories(
     return rows
 
 
+def _search_current_state_memories(
+    db: sqlite3.Connection,
+    as_of: str,
+):
+    rows = db.execute(f"select * from memories{_search_order('memories')}").fetchall()
+    rows = [
+        row
+        for row in rows
+        if _memory_visible(row, "current", as_of)
+        and row["authority"] in CURRENT_STATE_AUTHORITIES
+        and row["kind"] in CURRENT_STATE_MEMORY_KINDS
+    ]
+    rows.sort(key=_current_state_memory_key)
+    return rows
+
+
+def _current_state_memory_key(row: sqlite3.Row) -> tuple:
+    value = row["valid_from"] or row["occurred_at"] or ""
+    match = re.match(r"(\d{4})-(\d{2})-(\d{2})", value)
+    recency = -int("".join(match.groups())) if match else 0
+    return (
+        _authority_rank(row["authority"]),
+        0
+        if row["id"].startswith(AUTHORED_MEMORY_PREFIX) and not row["id"].startswith("MEM-AUTH-AUTO-")
+        else 1,
+        recency,
+        {"decision": 0, "task": 1, "open_question": 2, "preference": 3}.get(row["kind"], 4),
+        row["id"],
+    )
+
+
 def _memory_visible(row: sqlite3.Row, intent: str, as_of: str) -> bool:
     if intent == "history":
         return True
-    if row["status"] != "active":
-        return False
-    if intent not in {"current", "evidence"}:
-        return True
-    return (not row["valid_from"] or row["valid_from"] <= as_of) and (
-        not row["valid_to"] or as_of < row["valid_to"]
-    )
+    if intent in {"current", "evidence"}:
+        current_status = row["status"] == "active" or (
+            row["status"] == "superseded" and row["valid_to"]
+        )
+        return bool(current_status) and (
+            not row["valid_from"] or row["valid_from"] <= as_of
+        ) and (not row["valid_to"] or as_of < row["valid_to"])
+    return row["status"] == "active"
 
 
 def _search_meeting_spans(db: sqlite3.Connection, terms: list[str], question: str):

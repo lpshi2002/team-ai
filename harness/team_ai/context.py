@@ -15,11 +15,16 @@ def main(argv: list[str] | None = None) -> int:
         choices=("auto", "answer", "normal", "harness", "global_shared", "compare_projects", "implementation"),
         default="auto",
     )
+    parser.add_argument(
+        "--current-state",
+        action="store_true",
+        help="Load the project-wide current decisions, tasks, and open questions.",
+    )
     parser.add_argument("--limit", type=int, default=8)
     args = parser.parse_args(argv)
 
     question = " ".join(args.question)
-    packet = build_context(".", question, limit=args.limit, mode=args.mode)
+    packet = build_context(".", question, limit=args.limit, mode=args.mode, current_state=args.current_state)
     print(_summary(packet, args.mode))
     return 0
 
@@ -32,6 +37,8 @@ def _summary(packet: dict, mode: str) -> str:
         f"mode: {packet.get('mode', mode)}",
         f"intent: {packet.get('intent', 'current')}",
     ]
+    if packet.get("retrieval_view") == "current_state":
+        lines.append("view: current_state")
     if retrieval:
         lines.append(f"retrieval: {retrieval.get('status', 'no_match')}")
     lines.extend(
